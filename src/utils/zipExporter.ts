@@ -13,10 +13,11 @@ interface ExportOptions {
     guide: Blob | null;
     thanks: Blob | null;
   };
+  dynamicIconSize?: number;
 }
 
 export const exportStickersZip = async (options: ExportOptions) => {
-  const { albumName, stickers, extras } = options;
+  const { albumName, stickers, extras, dynamicIconSize = 50 } = options;
   if (!stickers.length) {
     throw new Error('没有任何主图，无法打包！');
   }
@@ -48,13 +49,13 @@ export const exportStickersZip = async (options: ExportOptions) => {
     rootFolder.file(`封面图_cover.png`, stickers[0].mainBlob); // 240x240 PNG is perfect
   }
 
-  // 聊天图标: fallback 将首图实时缩放至 50x50
+  // 聊天图标: fallback 将首图实时缩放
   if (extras.icon) {
     rootFolder.file(`聊天图标_icon.png`, extras.icon);
   } else {
     try {
-      // 实时调用降维打击，尺寸 50x50，无留白
-      const iconRes = await processTransparentSticker(stickers[0].mainBlob, 50, 0);
+      // 实时调用降维打击，无留白
+      const iconRes = await processTransparentSticker(stickers[0].mainBlob, dynamicIconSize, 0);
       rootFolder.file(`聊天图标_icon.png`, iconRes.blob);
     } catch (e) {
       console.warn("Failed to generate fallback icon", e);
