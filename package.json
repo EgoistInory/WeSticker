@@ -1,7 +1,9 @@
 {
-  "name": "stickerflow",
+  "name": "westicker-pro",
+  "version": "1.0.0",
+  "description": "A pure frontend extremely fast packing factory for WeChat Sticker Platform.",
+  "author": "StickerFlow Studio",
   "private": true,
-  "version": "0.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
