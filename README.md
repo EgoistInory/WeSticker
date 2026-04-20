@@ -36,7 +36,7 @@ npm -v
 ### 2. 克隆/打开目录与依赖下载
 使用终端或 PowerShell 导航至本目录并重装依赖矩阵：
 ```bash
-cd d:\YJ\StickerFlow
+cd WeSticker
 # 为防漏必须挂在本地锁
 npm install
 ```
@@ -55,7 +55,7 @@ npm run dev
 1. 在 Github 新建一个同名的空白仓库资源库。
 2. 在本地执行推送（由于已经内置 `.github/workflows/deploy.yml` 并且已经打好 Git 镜像）：
    ```bash
-   git remote add origin https://github.com/<您的用户名>/StickerFlow.git
+   git remote add origin https://github.com/<您的用户名>/WeSticker.git
    git push -u origin master
    ```
 3. 打开 GitHub 仓库设置界面：`Settings` -> `Pages` -> `Build and deployment` -> `Source` 选项卡，选择 **GitHub Actions**。
