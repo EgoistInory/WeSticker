@@ -1,13 +1,28 @@
 @import "tailwindcss";
 
 :root {
-  font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
+  font-family: ui-sans-serif, "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", system-ui, sans-serif;
   line-height: 1.5;
   font-weight: 400;
+  color: #17211d;
+  background: #f7fbf6;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
 
-  color-scheme: light dark;
-  color: rgba(255, 255, 255, 0.87);
-  background-color: #0d1117;
+* {
+  box-sizing: border-box;
+}
+
+html {
+  min-height: 100%;
+  background:
+    linear-gradient(90deg, rgba(17, 195, 106, 0.05) 1px, transparent 1px),
+    linear-gradient(180deg, rgba(17, 195, 106, 0.05) 1px, transparent 1px),
+    #f7fbf6;
+  background-size: 36px 36px;
 }
 
 body {
@@ -15,18 +30,41 @@ body {
   min-height: 100vh;
 }
 
-/* Minimalist Scrollbar */
-::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+button,
+input {
+  font: inherit;
 }
+
+button {
+  -webkit-tap-highlight-color: transparent;
+}
+
+img {
+  display: block;
+}
+
+#app {
+  min-height: 100vh;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
 ::-webkit-scrollbar-track {
   background: transparent;
 }
+
 ::-webkit-scrollbar-thumb {
-  background: #30363d;
-  border-radius: 4px;
+  background: #c7d9cf;
+  border: 3px solid transparent;
+  border-radius: 999px;
+  background-clip: content-box;
 }
+
 ::-webkit-scrollbar-thumb:hover {
-  background: #484f58;
+  background: #9ccab1;
+  border: 3px solid transparent;
+  background-clip: content-box;
 }

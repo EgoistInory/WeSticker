@@ -33,6 +33,46 @@ const canvasToBlob = (canvas: HTMLCanvasElement, type = 'image/png', quality?: n
   });
 };
 
+export const processAssetToSpec = async (
+  sourceBlob: Blob,
+  targetWidth: number,
+  targetHeight: number,
+  outputType: 'png' | 'jpg',
+  maxKB: number
+): Promise<Blob> => {
+  const img = await loadImage(sourceBlob);
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d');
+  if (!ctx) throw new Error('Cannot get canvas context');
+
+  canvas.width = targetWidth;
+  canvas.height = targetHeight;
+
+  if (outputType === 'jpg') {
+    ctx.fillStyle = '#FFFFFF';
+    ctx.fillRect(0, 0, targetWidth, targetHeight);
+  } else {
+    ctx.clearRect(0, 0, targetWidth, targetHeight);
+  }
+
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+
+  const scale = Math.max(targetWidth / img.width, targetHeight / img.height);
+  const drawWidth = img.width * scale;
+  const drawHeight = img.height * scale;
+  const dx = (targetWidth - drawWidth) / 2;
+  const dy = (targetHeight - drawHeight) / 2;
+
+  ctx.drawImage(img, dx, dy, drawWidth, drawHeight);
+
+  if (outputType === 'png') {
+    return await canvasToBlob(canvas, 'image/png');
+  }
+
+  return await compressToTargetKB(canvas, maxKB);
+};
+
 /**
  * 带有动态压质核心的 JPEG 生成器
  * @description 根据最高 KB 限制，自动步进降低质量直到体积达标
