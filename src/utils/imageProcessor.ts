@@ -9,6 +9,8 @@ export interface StickerCraftOptions {
   bgTolerance: number;
   /** Target background color mode: 'auto-corner' | 'white' | 'green' | 'black' */
   bgKeyMode: 'auto-corner' | 'white' | 'green' | 'black';
+  /** Background removal algorithm: 'flood-fill' protects internal whites; 'global' removes all matching color */
+  bgAlgorithm?: 'flood-fill' | 'global';
   /** Die-cut contour border width in px (0 = off, 1-12px) */
   strokeWidth: number;
   /** Die-cut contour border color (default #FFFFFF) */
@@ -29,6 +31,7 @@ export const DEFAULT_CRAFT_OPTIONS: StickerCraftOptions = {
   removeBg: false,
   bgTolerance: 28,
   bgKeyMode: 'auto-corner',
+  bgAlgorithm: 'flood-fill',
   strokeWidth: 4,
   strokeColor: '#FFFFFF',
   dropShadow: true,
@@ -71,14 +74,18 @@ export const loadImage = (source: File | Blob | string): Promise<HTMLImageElemen
 };
 
 /**
- * Smart Chroma-Key & Corner-Sampled Background Removal with soft alpha feathering.
+ * Smart Chroma-Key & Edge-Connected Flood-Fill Background Removal with soft alpha feathering.
+ * - 'flood-fill' (default): Starts from outer border pixels and only removes connected background,
+ *   preserving white eyes, white clothes, or white fur inside the character silhouette!
+ * - 'global': Removes all pixels matching the key color anywhere in the image.
  */
 function applySmartChromaKey(
   ctx: CanvasRenderingContext2D,
   width: number,
   height: number,
   mode: StickerCraftOptions['bgKeyMode'],
-  tolerance: number
+  tolerance: number,
+  algorithm: 'flood-fill' | 'global' = 'flood-fill'
 ) {
   const imgData = ctx.getImageData(0, 0, width, height);
   const data = imgData.data;
@@ -91,12 +98,16 @@ function applySmartChromaKey(
   } else if (mode === 'black') {
     keyR = 0; keyG = 0; keyB = 0;
   } else {
-    // Sample 4 corners (offset by 2px to avoid border artifacts)
+    // Sample 8 perimeter points (corners + mid-edges)
     const coords = [
       [2, 2],
       [width - 3, 2],
       [2, height - 3],
       [width - 3, height - 3],
+      [Math.floor(width / 2), 2],
+      [Math.floor(width / 2), height - 3],
+      [2, Math.floor(height / 2)],
+      [width - 3, Math.floor(height / 2)],
     ];
     let rSum = 0, gSum = 0, bSum = 0, count = 0;
     for (const [cx, cy] of coords) {
@@ -110,7 +121,7 @@ function applySmartChromaKey(
         }
       }
     }
-    if (count === 0) return; // Already transparent corners
+    if (count === 0) return; // Already transparent perimeter
     keyR = Math.round(rSum / count);
     keyG = Math.round(gSum / count);
     keyB = Math.round(bSum / count);
@@ -119,18 +130,74 @@ function applySmartChromaKey(
   const maxDist = (tolerance / 100) * 220;
   const featherRange = Math.max(12, maxDist * 0.35);
 
-  for (let i = 0; i < data.length; i += 4) {
-    if (data[i + 3] === 0) continue;
-    const dr = data[i] - keyR;
-    const dg = data[i + 1] - keyG;
-    const db = data[i + 2] - keyB;
-    const dist = Math.sqrt(dr * dr + dg * dg + db * db);
+  const colorDist = (pixelIndex: number): number => {
+    const offset = pixelIndex * 4;
+    const dr = data[offset] - keyR;
+    const dg = data[offset + 1] - keyG;
+    const db = data[offset + 2] - keyB;
+    return Math.sqrt(dr * dr + dg * dg + db * db);
+  };
 
-    if (dist <= maxDist) {
-      data[i + 3] = 0;
-    } else if (dist <= maxDist + featherRange) {
-      const factor = (dist - maxDist) / featherRange;
-      data[i + 3] = Math.round(data[i + 3] * factor);
+  if (algorithm === 'flood-fill') {
+    const totalPixels = width * height;
+    const visited = new Uint8Array(totalPixels);
+    const queue = new Int32Array(totalPixels);
+    let head = 0;
+    let tail = 0;
+
+    const tryEnqueue = (x: number, y: number) => {
+      const idx = y * width + x;
+      if (visited[idx]) return;
+      const d = colorDist(idx);
+      if (d <= maxDist + featherRange) {
+        visited[idx] = 1;
+        queue[tail++] = idx;
+      }
+    };
+
+    // Seed all 4 outer edges
+    for (let x = 0; x < width; x++) {
+      tryEnqueue(x, 0);
+      tryEnqueue(x, height - 1);
+    }
+    for (let y = 1; y < height - 1; y++) {
+      tryEnqueue(0, y);
+      tryEnqueue(width - 1, y);
+    }
+
+    while (head < tail) {
+      const curr = queue[head++];
+      const d = colorDist(curr);
+      const offset = curr * 4;
+
+      if (d <= maxDist) {
+        data[offset + 3] = 0;
+        // Only expand neighbors from core background pixels so we don't leak past outlines
+        const cx = curr % width;
+        const cy = (curr - cx) / width;
+        if (cx > 0) tryEnqueue(cx - 1, cy);
+        if (cx < width - 1) tryEnqueue(cx + 1, cy);
+        if (cy > 0) tryEnqueue(cx, cy - 1);
+        if (cy < height - 1) tryEnqueue(cx, cy + 1);
+      } else if (d <= maxDist + featherRange) {
+        const factor = (d - maxDist) / featherRange;
+        data[offset + 3] = Math.round(data[offset + 3] * factor);
+      }
+    }
+  } else {
+    for (let i = 0; i < data.length; i += 4) {
+      if (data[i + 3] === 0) continue;
+      const dr = data[i] - keyR;
+      const dg = data[i + 1] - keyG;
+      const db = data[i + 2] - keyB;
+      const dist = Math.sqrt(dr * dr + dg * dg + db * db);
+
+      if (dist <= maxDist) {
+        data[i + 3] = 0;
+      } else if (dist <= maxDist + featherRange) {
+        const factor = (dist - maxDist) / featherRange;
+        data[i + 3] = Math.round(data[i + 3] * factor);
+      }
     }
   }
 
@@ -276,7 +343,14 @@ export const processTransparentSticker = async (
   sCtx.drawImage(img, offsetX, offsetY, drawW, drawH);
 
   if (opts.removeBg) {
-    applySmartChromaKey(sCtx, targetSize, targetSize, opts.bgKeyMode, opts.bgTolerance);
+    applySmartChromaKey(
+      sCtx,
+      targetSize,
+      targetSize,
+      opts.bgKeyMode,
+      opts.bgTolerance,
+      opts.bgAlgorithm || 'flood-fill'
+    );
   }
 
   // Step 2: Compose Die-Cut Contour Stroke + Shadow + Subject on final canvas
@@ -462,6 +536,54 @@ export const processBannerAndReward = async (
 };
 
 /**
+ * Detects the non-transparent bounding box of a canvas and crops/re-centers the subject
+ * so slightly off-center AI grid cells become uniformly scaled and centered!
+ */
+function cropToContentBoundingBox(
+  sourceCanvas: HTMLCanvasElement,
+  padRatio: number = 0.04
+): HTMLCanvasElement {
+  const w = sourceCanvas.width;
+  const h = sourceCanvas.height;
+  const ctx = sourceCanvas.getContext('2d', { willReadFrequently: true })!;
+  const { data } = ctx.getImageData(0, 0, w, h);
+
+  let minX = w, minY = h, maxX = -1, maxY = -1;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const a = data[(y * w + x) * 4 + 3];
+      if (a > 35) {
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+    }
+  }
+
+  if (maxX <= minX || maxY <= minY) {
+    return sourceCanvas;
+  }
+
+  const contentW = maxX - minX + 1;
+  const contentH = maxY - minY + 1;
+  const maxDim = Math.max(contentW, contentH);
+  const pad = Math.round(maxDim * padRatio);
+  const outSize = maxDim + pad * 2;
+
+  const centeredCanvas = document.createElement('canvas');
+  centeredCanvas.width = outSize;
+  centeredCanvas.height = outSize;
+  const cCtx = centeredCanvas.getContext('2d')!;
+
+  const dx = Math.round((outSize - contentW) / 2);
+  const dy = Math.round((outSize - contentH) / 2);
+  cCtx.drawImage(sourceCanvas, minX, minY, contentW, contentH, dx, dy, contentW, contentH);
+
+  return centeredCanvas;
+}
+
+/**
  * AI Sprite Sheet Slicer:
  * Automatically slices a multi-grid AI sticker sheet (e.g., 3x3, 4x4, 4x6) into centered individual PNG files.
  */
@@ -471,7 +593,9 @@ export const sliceSpriteSheet = async (
   cols: number,
   trimPercent: number = 4,
   autoRemoveBg: boolean = true,
-  tolerance: number = 30
+  tolerance: number = 30,
+  autoCenterSubject: boolean = true,
+  bgAlgorithm: 'flood-fill' | 'global' = 'flood-fill'
 ): Promise<{ blob: Blob; previewUrl: string; index: number }[]> => {
   const img = await loadImage(file);
   const cellW = img.width / cols;
@@ -488,14 +612,18 @@ export const sliceSpriteSheet = async (
       const sw = Math.max(16, Math.round(cellW - trimX * 2));
       const sh = Math.max(16, Math.round(cellH - trimY * 2));
 
-      const cellCanvas = document.createElement('canvas');
+      let cellCanvas = document.createElement('canvas');
       cellCanvas.width = sw;
       cellCanvas.height = sh;
       const ctx = cellCanvas.getContext('2d', { willReadFrequently: true })!;
       ctx.drawImage(img, sx, sy, sw, sh, 0, 0, sw, sh);
 
       if (autoRemoveBg) {
-        applySmartChromaKey(ctx, sw, sh, 'auto-corner', tolerance);
+        applySmartChromaKey(ctx, sw, sh, 'auto-corner', tolerance, bgAlgorithm);
+      }
+
+      if (autoCenterSubject && autoRemoveBg) {
+        cellCanvas = cropToContentBoundingBox(cellCanvas, 0.05);
       }
 
       const blob = await new Promise<Blob>((resolve, reject) => {

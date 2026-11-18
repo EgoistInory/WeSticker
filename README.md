@@ -68,6 +68,13 @@
   <img src="./docs/screenshots/03-promo-storefront.png" alt="03. 运营物料一键合成与微信商店详情页预览" width="96%" />
 </div>
 
+### 04. AI 绘前指令编译器 & 九宫格分镜工作台 (Prompt Co-Pilot)
+> 无需接入任何付费生图 API！针对 **豆包/即梦 (Seedream)、GPT-4o、Nano Banana (Gemini)、Midjourney Niji 6、本地 Flux/SDXL** 五大主流模型底层注意力特性，提供主角基因锚定、白底/绿幕防撞色底色策略、分批连贯生成剧本（Batch A/B/C 轻松凑齐 16/24 张）以及九宫格配文同源绑定。复制指令生图后，直接右键复制图片回本页按 **`Ctrl + V`** 即可秒切并自动贴入 9 句配文；同时支持直接拖入未解压的 `.zip` 原始素材图包。
+
+<div align="center">
+  <img src="./docs/screenshots/04-ai-prompt-copilot.png" alt="04. AI 绘前指令编译器与九宫格分镜工作台" width="96%" />
+</div>
+
 ---
 
 ## 🧬 纯前端视觉与编码架构

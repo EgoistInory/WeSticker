@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, nextTick } from 'vue'
+import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
+import JSZip from 'jszip'
 import { VueDraggable } from 'vue-draggable-plus'
 import { VueCropper } from 'vue-cropper'
 import {
@@ -17,9 +18,18 @@ import type { MotionPreset } from './utils/gifEncoder'
 import {
   DEMO_PACKS,
   PROMPT_BLUEPRINTS,
+  STORYBOARD_BATCH_PRESETS,
+  STYLE_DESCRIPTORS,
+  BG_DESCRIPTORS,
+  compileMasterStickerPrompt,
   generateDemoPackRawBlobs,
   generateDemoSpriteSheetBlob,
   type DemoPackId,
+  type AIModelPlatform,
+  type BgColorStrategy,
+  type TextRenderStrategy,
+  type StoryboardCell,
+  type PromptCompilerConfig,
 } from './utils/demoPackGenerator'
 import { exportStickersZip } from './utils/zipExporter'
 
@@ -87,6 +97,14 @@ const MOTION_PRESETS: { k: MotionPreset; label: string }[] = [
   { k: 'bounce', label: 'Q弹果冻' },
   { k: 'wiggle', label: '魔性摇摆' },
   { k: 'pulse', label: '心跳呼吸' },
+]
+
+const AI_PLATFORMS: { id: AIModelPlatform; name: string; sub: string }[] = [
+  { id: 'doubao', name: '豆包 / 即梦', sub: '中文理解与垫图王牌' },
+  { id: 'gpt4o', name: 'GPT-4o / ChatGPT', sub: '强逻辑分格排版王' },
+  { id: 'nano-banana', name: 'Nano Banana', sub: 'Gemini 角色锁脸神器' },
+  { id: 'midjourney', name: 'Midjourney Niji 6', sub: '--cref 顶级贴纸画质' },
+  { id: 'local-flux', name: '本地 Flux / SDXL', sub: '含正反向提示词矩阵' },
 ]
 
 // Album Metadata
@@ -158,8 +176,80 @@ const slicerCols = ref(3)
 const slicerTrim = ref(4)
 const slicerAutoRemoveBg = ref(true)
 const slicerTolerance = ref(32)
-const slicerDefaultCaptions = ref<string[]>([])
+const slicerAutoCenter = ref(true)
+const slicerBgAlgorithm = ref<'flood-fill' | 'global'>('flood-fill')
+const slicerDefaultCaptions = ref<string[]>(
+  STORYBOARD_BATCH_PRESETS[0].cells.map((c) => c.caption)
+)
 const isSlicing = ref(false)
+
+// === AI Co-Pilot Prompt Compiler State ===
+const activeBatchId = ref<'batch-work' | 'batch-social' | 'batch-meme'>('batch-work')
+const promptConfig = ref<PromptCompilerConfig>({
+  platform: 'doubao',
+  subjectZh: '一只圆润可爱的卡皮巴拉（水豚）职场打工人，穿着浅蓝色程序员格子衫，戴着黑框眼镜，二头身Q版比例',
+  subjectEn: 'a cute chubby capybara office worker wearing a light blue plaid shirt and black-rimmed glasses, 2-head chibi proportion',
+  stylePreset: 'diecut-vector',
+  bgStrategy: 'pure-white',
+  textStrategy: 'studio-vector',
+  isFollowUpTurn: false,
+  cells: JSON.parse(JSON.stringify(STORYBOARD_BATCH_PRESETS[0].cells)),
+})
+
+const CHARACTER_TEMPLATES = [
+  {
+    label: '🦦 打工水豚',
+    zh: '一只圆润可爱的卡皮巴拉（水豚）职场打工人，穿着浅蓝色格子衫，戴着黑框眼镜，二头身Q版比例',
+    en: 'a cute chubby capybara office worker wearing a light blue plaid shirt and black-rimmed glasses, 2-head chibi proportion',
+    recommendedBg: 'pure-white' as BgColorStrategy,
+  },
+  {
+    label: '🐕 赛博柴犬',
+    zh: '一只帅气呆萌的橘色柴犬程序员，穿着黑色机能风连帽卫衣，戴着头戴式发光耳机，二头身Q版比例',
+    en: 'a cute orange Shiba Inu coder wearing a dark techwear hoodie and glowing headphones, 2-head chibi proportion',
+    recommendedBg: 'pure-white' as BgColorStrategy,
+  },
+  {
+    label: '🐱 纯白奶猫 (绿幕防撞色)',
+    zh: '一只通体雪白软萌的波斯猫，粉色肉垫与蓝宝石大眼睛，系着红色小铃铛项圈，二头身Q版比例',
+    en: 'a fluffy pure snow-white Persian kitten with pink paws, sapphire blue eyes and a red bell collar, 2-head chibi proportion',
+    recommendedBg: 'chroma-green' as BgColorStrategy,
+  },
+  {
+    label: '🐼 恶搞熊猫头 (绿幕防撞色)',
+    zh: '经典黑白魔性搞笑熊猫头表情包角色，纯白圆润头型配黑眼圈，夸张搞笑五官',
+    en: 'classic funny meme panda mascot with white round head, black eye patches and exaggerated comical facial expressions',
+    recommendedBg: 'chroma-green' as BgColorStrategy,
+  },
+]
+
+const selectCharacterTemplate = (tpl: (typeof CHARACTER_TEMPLATES)[number]) => {
+  promptConfig.value.subjectZh = tpl.zh
+  promptConfig.value.subjectEn = tpl.en
+  promptConfig.value.bgStrategy = tpl.recommendedBg
+  triggerToast(`已切换角色基因模板：${tpl.label}（已自动匹配最佳防撞色背景）`)
+}
+
+const selectStoryboardBatch = (batchId: 'batch-work' | 'batch-social' | 'batch-meme') => {
+  activeBatchId.value = batchId
+  const found = STORYBOARD_BATCH_PRESETS.find((b) => b.id === batchId)
+  if (found) {
+    promptConfig.value.cells = JSON.parse(JSON.stringify(found.cells))
+    promptConfig.value.isFollowUpTurn = batchId !== 'batch-work'
+    slicerDefaultCaptions.value = found.cells.map((c) => c.caption)
+    triggerToast(`已载入「${found.label}」分镜，并已同步 9 格配文到切分舱`)
+  }
+}
+
+const compiledPromptResult = computed(() => compileMasterStickerPrompt(promptConfig.value))
+
+const copyAndSyncPromptToSlicer = async () => {
+  slicerRows.value = 3
+  slicerCols.value = 3
+  slicerDefaultCaptions.value = promptConfig.value.cells.map((c) => c.caption)
+  await copyPromptText(compiledPromptResult.value.mainPrompt, 'AI 九宫格母版生图指令')
+  triggerToast('指令已复制！去 AI 生图后右键复制图片，回本页面直接按 Ctrl+V 即可自动切分并打上这 9 句配文！')
+}
 
 // Live WeChat Device Twin State
 const deviceTab = ref<DeviceSimTab>('chat')
@@ -369,17 +459,59 @@ const loadDemoPack = async (packId: DemoPackId) => {
   }
 }
 
-// Upload Main Stickers
+// Universal AI Raw Material Spec Suffixes (for users who write their own prompts)
+const UNIVERSAL_SPEC_SUFFIX_ZH =
+  '【出图规范强约束】：1:1正方形画布，角色居中且四周预留15%以上空白呼吸区（严禁耳朵、手脚或道具碰到画布边缘被裁切），纯平涂单一纯色背景（#FFFFFF纯白或#00FF00纯绿幕，严禁地面阴影、渐变或背景杂物），角色外轮廓清晰闭合，若为九宫格则按3×3无框均匀排列且绝对不要画出网格分割黑线。'
+
+const UNIVERSAL_SPEC_SUFFIX_EN =
+  '1:1 square canvas, centered character with 15% empty margin around silhouette (strictly no cropped ears, hands, or props at edges), 100% flat solid background (#FFFFFF pure white or #00FF00 chroma green, no cast shadows, no gradients, no background clutter), crisp isolated outer outline, knolling layout with no visible grid lines --no cropped edges, grid lines, panel frames, shadow, gradient'
+
+const showSpecGuideDrawer = ref(false)
+
+// Upload Main Stickers (Supports single/multi images AND .zip raw asset packs!)
 const handleFiles = async (files: FileList | null) => {
   if (!files || files.length === 0) return
   isBatchCrafting.value = true
   try {
     let added = 0
+    let zipExtracted = 0
+
     for (let i = 0; i < files.length; i++) {
       const file = files[i]
+
+      // Lazy Mode: Automatically parse .zip raw image archives!
+      if (file.name.toLowerCase().endsWith('.zip') || file.type === 'application/zip' || file.type === 'application/x-zip-compressed') {
+        try {
+          const zip = await JSZip.loadAsync(file)
+          const entryNames = Object.keys(zip.files)
+            .filter((name) => {
+              const entry = zip.files[name]
+              if (entry.dir) return false
+              if (name.includes('__MACOSX') || name.startsWith('.')) return false
+              return /\.(png|jpe?g|webp|gif)$/i.test(name)
+            })
+            .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
+
+          for (const entryName of entryNames) {
+            const rawBlob = await zip.files[entryName].async('blob')
+            const baseFileName = entryName.split('/').pop() || entryName
+            const cleanName = baseFileName.replace(/\.[^/.]+$/, '')
+            const defaultCaption = cleanName.length <= 5 && !/^\d+$/.test(cleanName) ? cleanName : ''
+            const item = await buildStickerItem(rawBlob, baseFileName, defaultCaption)
+            mainStickers.value.push(item)
+            added++
+            zipExtracted++
+          }
+        } catch (zipErr) {
+          console.error('Failed to parse uploaded zip pack:', zipErr)
+          triggerToast(`解析图包 ${file.name} 失败，请确认是有效的图片 ZIP 压缩包`)
+        }
+        continue
+      }
+
       if (!file.type.startsWith('image/')) continue
       const cleanName = file.name.replace(/\.[^/.]+$/, '')
-      const defaultCaption = cleanName.length <= 5 ? cleanName : ''
+      const defaultCaption = cleanName.length <= 5 && !/^\d+$/.test(cleanName) ? cleanName : ''
       const item = await buildStickerItem(file, file.name, defaultCaption)
       mainStickers.value.push(item)
       added++
@@ -388,7 +520,12 @@ const handleFiles = async (files: FileList | null) => {
       if (!selectedStickerId.value && mainStickers.value[0]) {
         selectedStickerId.value = mainStickers.value[0].id
       }
-      triggerToast(`成功导入并精修 ${added} 张表情主图`)
+      await handleAutoSynthesizePromo(true)
+      triggerToast(
+        zipExtracted > 0
+          ? `📦 已自动解压原始图包并导入精修 ${added} 张表情主图！`
+          : `成功导入并精修 ${added} 张表情主图`
+      )
     }
   } finally {
     isBatchCrafting.value = false
@@ -496,7 +633,7 @@ const onUploadSpriteSheet = (e: Event) => {
   slicerDefaultCaptions.value = []
 }
 
-const executeSpriteSheetSlice = async () => {
+const executeSpriteSheetSlice = async (mode: 'replace' | 'append' = 'replace') => {
   if (!slicerSourceBlob.value || isSlicing.value) return
   isSlicing.value = true
   try {
@@ -506,32 +643,69 @@ const executeSpriteSheetSlice = async () => {
       slicerCols.value,
       slicerTrim.value,
       slicerAutoRemoveBg.value,
-      slicerTolerance.value
+      slicerTolerance.value,
+      slicerAutoCenter.value,
+      slicerBgAlgorithm.value
     )
 
-    // Replace current matrix with sliced cells
-    mainStickers.value.forEach(revokeStickerUrls)
-    const newStickers: StickerItem[] = []
+    if (mode === 'replace') {
+      mainStickers.value.forEach(revokeStickerUrls)
+    }
+
+    const startIndex = mode === 'append' ? mainStickers.value.length : 0
+    const newStickers: StickerItem[] = mode === 'append' ? [...mainStickers.value] : []
 
     for (let i = 0; i < cells.length; i++) {
       const cell = cells[i]
       URL.revokeObjectURL(cell.previewUrl)
-      const cap = slicerDefaultCaptions.value[i] || ''
+      // If AI native text was already drawn by AI, don't double-render caption unless user wants studio-vector
+      const cap =
+        promptConfig.value.textStrategy === 'ai-native'
+          ? ''
+          : slicerDefaultCaptions.value[i] || ''
       const built = await buildStickerItem(
         cell.blob,
-        `slice_${String(cell.index).padStart(2, '0')}.png`,
+        `slice_${String(startIndex + i + 1).padStart(2, '0')}.png`,
         cap
       )
       newStickers.push(built)
     }
 
     mainStickers.value = newStickers
-    if (newStickers[0]) selectedStickerId.value = newStickers[0].id
+    if (newStickers[startIndex]) selectedStickerId.value = newStickers[startIndex].id
     activeTab.value = 'matrix'
     await handleAutoSynthesizePromo(true)
-    triggerToast(`激光切分完成！已将 ${cells.length} 张独立贴纸导入矩阵并自动去背加白边`)
+    triggerToast(
+      mode === 'append'
+        ? `已追加 ${cells.length} 张切分贴纸！当前矩阵共 ${newStickers.length} 张`
+        : `激光切分完成！已将 ${cells.length} 张独立贴纸导入矩阵并自动去背加白边`
+    )
   } finally {
     isSlicing.value = false
+  }
+}
+
+// === Global Ctrl+V Clipboard Image Paste Handler ===
+const handleGlobalPaste = async (e: ClipboardEvent) => {
+  const items = e.clipboardData?.items
+  if (!items) return
+
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i]
+    if (item.type.startsWith('image/')) {
+      const file = item.getAsFile()
+      if (!file) continue
+      e.preventDefault()
+
+      if (slicerPreviewUrl.value) URL.revokeObjectURL(slicerPreviewUrl.value)
+      slicerSourceBlob.value = file
+      slicerPreviewUrl.value = URL.createObjectURL(file)
+      // Sync captions from active Prompt Co-Pilot storyboard
+      slicerDefaultCaptions.value = promptConfig.value.cells.map((c) => c.caption)
+      activeTab.value = 'slicer'
+      triggerToast('📋 已从剪贴板粘贴 AI 图片至九宫格切分舱！点击右下角按钮即可一键切开')
+      return
+    }
   }
 }
 
@@ -774,8 +948,14 @@ onMounted(async () => {
     }
   }
 
+  window.addEventListener('paste', handleGlobalPaste)
+
   // Zero-Empty-State: Load the flagship Capybara showcase pack on mount so the workbench is immediately alive!
   await loadDemoPack('capybara')
+})
+
+onUnmounted(() => {
+  window.removeEventListener('paste', handleGlobalPaste)
 })
 </script>
 
@@ -920,7 +1100,7 @@ onMounted(async () => {
             "
           >
             <span>02. AI 九宫格切分舱</span>
-            <span class="rounded bg-[#FF5A36]/20 px-1.5 py-0.2 text-[10px] font-black text-[#FF5A36]">NEW</span>
+            <span class="rounded bg-[#FF5A36]/20 px-1.5 py-0.2 text-[10px] font-black text-[#FF5A36]">Ctrl+V</span>
           </button>
 
           <button
@@ -942,7 +1122,7 @@ onMounted(async () => {
 
           <button
             @click="activeTab = 'prompts'"
-            class="hidden items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-bold transition md:flex"
+            class="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-bold transition"
             :class="
               activeTab === 'prompts'
                 ? studioTheme === 'dark'
@@ -951,7 +1131,8 @@ onMounted(async () => {
                 : 'text-[#8A919E] hover:text-current'
             "
           >
-            <span>04. AI 提示词蓝图</span>
+            <span>04. AI 绘前指令工坊</span>
+            <span class="rounded bg-[#07C160]/20 px-1.5 py-0.2 text-[10px] font-black text-[#07C160]">规范助手</span>
           </button>
         </nav>
 
@@ -1022,6 +1203,84 @@ onMounted(async () => {
     <main class="mx-auto grid max-w-[1640px] grid-cols-1 gap-5 px-4 py-5 sm:px-6 lg:grid-cols-12">
       <!-- LEFT / CENTER WORKSPACE (8 Columns on Desktop) -->
       <div class="flex flex-col gap-5 lg:col-span-8">
+        <!-- Painless Zero-API AI Co-Creation & Raw Spec Assistant Strip -->
+        <div
+          class="rounded-xl border p-3 text-xs transition-all"
+          :class="
+            studioTheme === 'dark'
+              ? 'border-[#222631] bg-[#13151A]/95'
+              : 'border-[#DCD9D0] bg-white/95'
+          "
+        >
+          <div class="flex flex-wrap items-center justify-between gap-2">
+            <div class="flex flex-wrap items-center gap-2 font-bold">
+              <span class="rounded bg-[#07C160] px-2 py-0.5 text-[10px] font-black text-[#04150B]">AI 绘前规范助手</span>
+              <span>让豆包 / GPT-4o / Nano Banana / MJ 生成最契合本平台切图抠图的原图：</span>
+            </div>
+
+            <div class="flex flex-wrap items-center gap-1.5">
+              <button
+                @click="copyPromptText(UNIVERSAL_SPEC_SUFFIX_ZH, '中文 AI 绘前防裁切规范后缀')"
+                class="rounded-lg bg-[#07C160]/15 px-2.5 py-1 text-[11px] font-black text-[#07C160] transition hover:bg-[#07C160] hover:text-[#04150B]"
+                title="直接粘贴在您给豆包/GPT-4o/即梦的提示词末尾，强制AI留白、纯色底、不画网格黑线"
+              >
+                📋 复制「中文防翻车规范后缀」
+              </button>
+              <button
+                @click="copyPromptText(UNIVERSAL_SPEC_SUFFIX_EN, '英文 MJ/Banana 防裁切规范后缀')"
+                class="rounded-lg border border-neutral-500/30 px-2.5 py-1 text-[11px] font-bold transition hover:border-[#07C160]"
+                title="适合追加在 Midjourney / Nano Banana / Flux 英文提示词末尾"
+              >
+                📋 复制「英文规范后缀」
+              </button>
+              <button
+                @click="showSpecGuideDrawer = !showSpecGuideDrawer"
+                class="rounded-lg border border-neutral-500/20 px-2 py-1 text-[11px] font-bold text-[#8A919E] hover:text-current"
+              >
+                {{ showSpecGuideDrawer ? '收起原图要求 ▲' : '查看 4 条原图铁律 ▼' }}
+              </button>
+              <button
+                v-if="activeTab !== 'prompts'"
+                @click="activeTab = 'prompts'"
+                class="rounded-lg bg-[#FF5A36] px-2.5 py-1 text-[11px] font-black text-white transition hover:bg-[#E04826]"
+              >
+                ✨ 打开完整九宫格指令编译器 ↗
+              </button>
+            </div>
+          </div>
+
+          <!-- Collapsible 4 Golden Rules for Raw AI Assets -->
+          <div
+            v-if="showSpecGuideDrawer"
+            class="mt-3 grid grid-cols-1 gap-2.5 border-t pt-3 sm:grid-cols-4"
+            :class="studioTheme === 'dark' ? 'border-[#222631]' : 'border-[#E5E2D9]'"
+          >
+            <div class="rounded-lg border border-neutral-500/15 bg-black/15 p-2.5">
+              <div class="font-black text-[#07C160]">① 四周留足 15% 负空间</div>
+              <p class="mt-1 text-[11px] text-[#8A919E]">
+                叮嘱 AI 角色居中且头顶/耳朵/手脚绝不贴边，本工坊才能为您加上完整圆润的 4px 刀模白边与 2px 微信安全留白。
+              </p>
+            </div>
+            <div class="rounded-lg border border-neutral-500/15 bg-black/15 p-2.5">
+              <div class="font-black text-[#FF5A36]">② 白底 vs 绿幕防撞色</div>
+              <p class="mt-1 text-[11px] text-[#8A919E]">
+                常规角色要求「纯白无阴影背景 `#FFFFFF`」；若角色是白猫/白兔/穿白衣，要求「纯绿幕 `#00FF00`」，抠图 0 误伤。
+              </p>
+            </div>
+            <div class="rounded-lg border border-neutral-500/15 bg-black/15 p-2.5">
+              <div class="font-black text-amber-400">③ 九宫格严禁画分割黑线</div>
+              <p class="mt-1 text-[11px] text-[#8A919E]">
+                让 AI 画 3×3 九宫格时强调「无框 Knolling 均匀排列，严禁画出黑色方框线」，生完图右键复制按 `Ctrl+V` 直接秒切。
+              </p>
+            </div>
+            <div class="rounded-lg border border-neutral-500/15 bg-black/15 p-2.5">
+              <div class="font-black text-sky-400">④ 支持直接拖入 `.zip` 原图包</div>
+              <p class="mt-1 text-[11px] text-[#8A919E]">
+                从豆包、即梦或 Midjourney 批量下载的 `.zip` 原始图包无需手动解压，直接拖进下方矩阵即可自动解析全部图片！
+              </p>
+            </div>
+          </div>
+        </div>
         <!-- ======================================================= -->
         <!-- TAB 01: DIE-CUT STICKER MATRIX & CRAFT LAB              -->
         <!-- ======================================================= -->
@@ -1231,21 +1490,22 @@ onMounted(async () => {
               </div>
 
               <div class="flex items-center gap-2">
-                <!-- Quick Upload Input -->
+                <!-- Quick Upload Input (Images + .ZIP Raw Packs) -->
                 <label
                   for="main-sticker-upload"
                   class="flex cursor-pointer items-center gap-1.5 rounded-lg bg-[#07C160] px-3 py-1.5 text-xs font-black text-[#04150B] transition hover:bg-[#06AD56]"
+                  title="支持直接选多张图片，或直接拖入未解压的 .zip 原始素材图包！"
                 >
                   <svg class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M12 4v16m8-8H4" />
                   </svg>
-                  <span>导入单图/多图</span>
+                  <span>导入单图 / 多图 / .ZIP 原图包</span>
                 </label>
                 <input
                   id="main-sticker-upload"
                   type="file"
                   multiple
-                  accept="image/*"
+                  accept="image/*,.zip,application/zip"
                   class="hidden"
                   @change="onFileSelectMain"
                 />
@@ -1383,9 +1643,9 @@ onMounted(async () => {
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
                   </svg>
                 </div>
-                <p class="text-base font-black">拖拽或点击导入您的 AI 贴纸原图</p>
+                <p class="text-base font-black">拖拽或点击导入您的 AI 贴纸原图（支持直接拖入 .ZIP 原始图包）</p>
                 <p class="mt-1 max-w-md text-xs text-[#8A919E]">
-                  支持批量导入 PNG / JPG / WebP，或点击上方演示样片一键体验全链路刀模白边、配文与真机预检。
+                  支持批量导入 PNG / JPG / WebP 或未解压的 .ZIP 原始素材包；若为 AI 九宫格整图，直接按 Ctrl+V 即可秒切。
                 </p>
               </label>
             </div>
@@ -1541,7 +1801,7 @@ onMounted(async () => {
                     <div class="flex items-center justify-between text-xs font-bold">
                       <label class="flex cursor-pointer items-center gap-2">
                         <input type="checkbox" v-model="slicerAutoRemoveBg" class="accent-[#07C160]" />
-                        <span>3. 切分同时自动吸色抠除纯色背景</span>
+                        <span>3. 智能去背与主体自动居中归一化</span>
                       </label>
                       <span class="font-mono-num text-xs text-[#FF5A36]">容差 {{ slicerTolerance }}</span>
                     </div>
@@ -1553,16 +1813,80 @@ onMounted(async () => {
                       :disabled="!slicerAutoRemoveBg"
                       class="mt-2 w-full accent-[#FF5A36] disabled:opacity-40"
                     />
+                    <div class="mt-2 flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                      <div class="flex items-center gap-1.5">
+                        <button
+                          @click="slicerBgAlgorithm = 'flood-fill'"
+                          class="rounded border px-2 py-0.5 text-[10px] font-bold"
+                          :class="
+                            slicerBgAlgorithm === 'flood-fill'
+                              ? 'border-[#07C160] bg-[#07C160]/15 text-[#07C160]'
+                              : 'border-neutral-500/20 text-[#8A919E]'
+                          "
+                          title="从四周边缘向内漫水抠图，绝不误伤角色内部的白眼仁或白衬衫"
+                        >
+                          边缘漫水 (护白眼/白衣)
+                        </button>
+                        <button
+                          @click="slicerBgAlgorithm = 'global'"
+                          class="rounded border px-2 py-0.5 text-[10px] font-bold"
+                          :class="
+                            slicerBgAlgorithm === 'global'
+                              ? 'border-[#07C160] bg-[#07C160]/15 text-[#07C160]'
+                              : 'border-neutral-500/20 text-[#8A919E]'
+                          "
+                          title="全局色差过滤，适合纯正绿幕背景 (#00FF00)"
+                        >
+                          全局色度 (绿幕专用)
+                        </button>
+                      </div>
+
+                      <label class="flex cursor-pointer items-center gap-1 text-[10px] text-[#8A919E]">
+                        <input type="checkbox" v-model="slicerAutoCenter" class="accent-[#07C160]" />
+                        <span>包围盒自动居中</span>
+                      </label>
+                    </div>
+                  </div>
+
+                  <!-- Bound Captions Preview Strip -->
+                  <div
+                    class="rounded-xl border p-3 text-xs"
+                    :class="studioTheme === 'dark' ? 'border-[#222631] bg-[#0C0D10]' : 'border-[#E5E2D9] bg-[#F8F7F3]'"
+                  >
+                    <div class="flex items-center justify-between">
+                      <span class="font-bold text-[#07C160]">4. 切分时自动贴入的 9 格配文 (与指令工坊同步)</span>
+                      <button @click="activeTab = 'prompts'" class="text-[10px] font-bold text-[#8A919E] hover:text-white">
+                        去修改配文 ↗
+                      </button>
+                    </div>
+                    <div class="mt-2 flex flex-wrap gap-1">
+                      <span
+                        v-for="(cap, idx) in slicerDefaultCaptions.slice(0, slicerRows * slicerCols)"
+                        :key="idx"
+                        class="font-mono-num rounded border border-neutral-500/20 bg-neutral-500/10 px-1.5 py-0.5 text-[10px]"
+                      >
+                        #0{{ idx + 1 }} {{ cap || '无字' }}
+                      </span>
+                    </div>
                   </div>
                 </div>
 
-                <button
-                  @click="executeSpriteSheetSlice"
-                  :disabled="!slicerSourceBlob || isSlicing"
-                  class="w-full rounded-xl bg-[#07C160] py-3.5 text-sm font-black text-[#04150B] shadow-lg transition hover:bg-[#06AD56] disabled:opacity-40"
-                >
-                  {{ isSlicing ? '正在执行激光切分与刀模渲染...' : `⚡ 立即切分为 ${slicerRows * slicerCols} 张独立贴纸并导入矩阵` }}
-                </button>
+                <div class="flex flex-col gap-2">
+                  <button
+                    @click="executeSpriteSheetSlice('replace')"
+                    :disabled="!slicerSourceBlob || isSlicing"
+                    class="w-full rounded-xl bg-[#07C160] py-3 text-xs font-black text-[#04150B] shadow-lg transition hover:bg-[#06AD56] disabled:opacity-40"
+                  >
+                    {{ isSlicing ? '正在执行激光切分与刀模渲染...' : `⚡ 切分为 ${slicerRows * slicerCols} 张贴纸并【覆盖】当前矩阵` }}
+                  </button>
+                  <button
+                    @click="executeSpriteSheetSlice('append')"
+                    :disabled="!slicerSourceBlob || isSlicing"
+                    class="w-full rounded-xl border border-[#07C160]/50 bg-[#07C160]/10 py-2.5 text-xs font-black text-[#07C160] transition hover:bg-[#07C160]/20 disabled:opacity-40"
+                  >
+                    ➕ 切分并【追加】到矩阵末尾 (当前 {{ mainStickers.length }} 张 ➔ {{ mainStickers.length + slicerRows * slicerCols }} 张，轻松凑齐 16/24 张)
+                  </button>
+                </div>
               </div>
             </div>
           </section>
@@ -1713,58 +2037,285 @@ onMounted(async () => {
         </template>
 
         <!-- ======================================================= -->
-        <!-- TAB 04: AI PROMPT BLUEPRINTS                            -->
+        <!-- TAB 04: AI CO-PILOT PROMPT STUDIO & STORYBOARD          -->
         <!-- ======================================================= -->
         <template v-else-if="activeTab === 'prompts'">
           <section
-            class="rounded-2xl border p-5 shadow-sm"
+            class="flex flex-col gap-5 rounded-2xl border p-5 shadow-sm"
             :class="
               studioTheme === 'dark'
                 ? 'border-[#222631] bg-[#13151A]'
                 : 'border-[#DCD9D0] bg-white'
             "
           >
-            <div class="mb-4 border-b pb-4" :class="studioTheme === 'dark' ? 'border-[#222631]' : 'border-[#E5E2D9]'">
-              <h2 class="text-base font-black">AI 角色一致性贴纸母版 Prompt 蓝图库</h2>
-              <p class="mt-1 text-xs text-[#8A919E]">
-                针对微信表情开放平台专门调优的提示词结构：强制纯色干净背景、角色多动作不重样、严控网格间距防越界。
-              </p>
+            <!-- Studio Header -->
+            <div class="flex flex-wrap items-center justify-between gap-3 border-b pb-4" :class="studioTheme === 'dark' ? 'border-[#222631]' : 'border-[#E5E2D9]'">
+              <div>
+                <div class="flex items-center gap-2">
+                  <span class="rounded bg-[#07C160] px-2 py-0.5 text-[10px] font-black text-[#04150B]">PROMPT CO-PILOT</span>
+                  <h2 class="text-base font-black">AI 绘前指令编译器 &amp; 九宫格分镜工作台</h2>
+                </div>
+                <p class="mt-1 text-xs text-[#8A919E]">
+                  无需 API！融合顶级提示词工程师与插画师实战范式：为您编译防跨格粘连、防画框黑线、防变脸的专属九宫格指令，并与切分舱自动同步 9 格配文。
+                </p>
+              </div>
+
+              <button
+                @click="copyAndSyncPromptToSlicer"
+                class="flex items-center gap-2 rounded-xl bg-[#07C160] px-4 py-2.5 text-xs font-black text-[#04150B] shadow-md transition hover:bg-[#06AD56]"
+              >
+                <span>⚡ 一键复制生图指令 &amp; 绑定 9 格配文到切分舱</span>
+              </button>
             </div>
 
-            <div class="flex flex-col gap-4">
+            <!-- Step 1: Select Target AI Model Platform -->
+            <div
+              class="rounded-xl border p-4"
+              :class="studioTheme === 'dark' ? 'border-[#222631] bg-[#0C0D10]' : 'border-[#E5E2D9] bg-[#FAF9F5]'"
+            >
+              <div class="mb-2.5 flex items-center justify-between">
+                <span class="text-xs font-black">STEP 1 · 选择您正在使用的 AI 生图对话模型 (自动适配专属语法约束)</span>
+                <span class="text-[11px] text-[#07C160]">针对不同模型底层空间注意力机制专门调优</span>
+              </div>
+              <div class="grid grid-cols-2 gap-2 sm:grid-cols-5">
+                <button
+                  v-for="plat in AI_PLATFORMS"
+                  :key="plat.id"
+                  @click="promptConfig.platform = plat.id"
+                  class="flex flex-col items-start rounded-xl border p-2.5 text-left transition"
+                  :class="
+                    promptConfig.platform === plat.id
+                      ? 'border-[#07C160] bg-[#07C160]/15 ring-1 ring-[#07C160]'
+                      : 'border-neutral-500/20 hover:border-neutral-500/40'
+                  "
+                >
+                  <span class="text-xs font-black" :class="promptConfig.platform === plat.id ? 'text-[#07C160]' : ''">
+                    {{ plat.name }}
+                  </span>
+                  <span class="mt-0.5 text-[10px] text-[#8A919E]">{{ plat.sub }}</span>
+                </button>
+              </div>
+            </div>
+
+            <!-- Step 2: Character Identity Lock & Anti-Bleed Background Strategy -->
+            <div class="grid grid-cols-1 gap-4 lg:grid-cols-12">
+              <!-- Character DNA -->
               <div
-                v-for="bp in PROMPT_BLUEPRINTS"
-                :key="bp.id"
-                class="rounded-xl border p-4"
-                :class="studioTheme === 'dark' ? 'border-[#222631] bg-[#0C0D10]' : 'border-[#E2DFD7] bg-[#FAF9F5]'"
+                class="flex flex-col gap-3 rounded-xl border p-4 lg:col-span-7"
+                :class="studioTheme === 'dark' ? 'border-[#222631] bg-[#0C0D10]' : 'border-[#E5E2D9] bg-[#FAF9F5]'"
               >
                 <div class="flex flex-wrap items-center justify-between gap-2">
-                  <div class="flex items-center gap-2">
-                    <span class="rounded bg-[#07C160]/20 px-2 py-0.5 text-[10px] font-black text-[#07C160]">{{ bp.modelTag }}</span>
-                    <span class="font-mono-num rounded bg-neutral-500/15 px-2 py-0.5 text-[10px] font-bold">{{ bp.gridSpec }}</span>
-                    <h3 class="text-sm font-black">{{ bp.title }}</h3>
-                  </div>
-
-                  <div class="flex items-center gap-2">
+                  <span class="text-xs font-black">STEP 2 · 设定主角基因锚点 (Character DNA Lock)</span>
+                  <div class="flex flex-wrap gap-1.5">
                     <button
-                      @click="copyPromptText(bp.promptEn, `${bp.title} (英文)`)"
-                      class="rounded-lg bg-[#07C160] px-3 py-1 text-xs font-black text-[#04150B] transition hover:bg-[#06AD56]"
+                      v-for="tpl in CHARACTER_TEMPLATES"
+                      :key="tpl.label"
+                      @click="selectCharacterTemplate(tpl)"
+                      class="rounded-md border border-neutral-500/25 bg-neutral-500/10 px-2 py-0.5 text-[10px] font-bold transition hover:border-[#07C160] hover:text-[#07C160]"
                     >
-                      复制英文 Prompt
-                    </button>
-                    <button
-                      @click="copyPromptText(bp.promptZh, `${bp.title} (中文)`)"
-                      class="rounded-lg border border-neutral-500/30 px-3 py-1 text-xs font-bold transition hover:border-[#07C160]"
-                    >
-                      复制中文 Prompt
+                      {{ tpl.label }}
                     </button>
                   </div>
                 </div>
 
-                <div class="mt-3 rounded-lg border border-neutral-500/15 bg-black/20 p-3 font-mono text-xs leading-relaxed text-[#A0A7B5]">
-                  {{ bp.promptEn }}
+                <label class="flex flex-col gap-1 text-xs">
+                  <span class="text-[11px] text-[#8A919E]">角色外貌、服装与标志性配饰描述（越具体，9 个格子越不会变脸）：</span>
+                  <textarea
+                    v-model="promptConfig.subjectZh"
+                    rows="2"
+                    class="w-full rounded-lg border border-neutral-500/30 bg-transparent p-2.5 text-xs font-bold outline-none focus:border-[#07C160]"
+                    placeholder="例如：一只圆润可爱的卡皮巴拉职场打工人，穿着浅蓝色格子衫，戴黑框眼镜..."
+                  ></textarea>
+                </label>
+
+                <div class="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                  <button
+                    v-for="(stObj, stKey) in STYLE_DESCRIPTORS"
+                    :key="stKey"
+                    @click="promptConfig.stylePreset = stKey"
+                    class="rounded-lg border px-2.5 py-2 text-left text-[11px] font-bold transition"
+                    :class="
+                      promptConfig.stylePreset === stKey
+                        ? 'border-[#07C160] bg-[#07C160]/15 text-[#07C160]'
+                        : 'border-neutral-500/20 text-[#8A919E]'
+                    "
+                  >
+                    {{ stObj.label }}
+                  </button>
                 </div>
-                <p class="mt-2 text-xs text-[#8A919E]">💡 实战技巧：{{ bp.tips }}</p>
+              </div>
+
+              <!-- Background & Typography Strategy -->
+              <div
+                class="flex flex-col justify-between gap-3 rounded-xl border p-4 lg:col-span-5"
+                :class="studioTheme === 'dark' ? 'border-[#222631] bg-[#0C0D10]' : 'border-[#E5E2D9] bg-[#FAF9F5]'"
+              >
+                <div>
+                  <span class="text-xs font-black">STEP 3 · 艺术家防翻车底色与文字策略</span>
+                  <div class="mt-2 grid grid-cols-3 gap-2">
+                    <button
+                      v-for="(bgObj, bgKey) in BG_DESCRIPTORS"
+                      :key="bgKey"
+                      @click="promptConfig.bgStrategy = bgKey"
+                      class="flex flex-col items-start rounded-lg border p-2 text-left transition"
+                      :class="
+                        promptConfig.bgStrategy === bgKey
+                          ? 'border-[#FF5A36] bg-[#FF5A36]/15 text-[#FF5A36]'
+                          : 'border-neutral-500/20 text-[#8A919E]'
+                      "
+                    >
+                      <div class="flex items-center gap-1.5">
+                        <span class="h-3 w-3 shrink-0 rounded-full border border-neutral-400" :style="{ backgroundColor: bgObj.hex }"></span>
+                        <span class="whitespace-nowrap text-[11px] font-black">{{ bgObj.label.split(' ')[0] }}</span>
+                      </div>
+                      <span class="font-mono-num mt-0.5 text-[9px] opacity-75">{{ bgObj.hex }}</span>
+                    </button>
+                  </div>
+                  <p class="mt-1.5 text-[10px] text-[#8A919E]">
+                    💡 {{ BG_DESCRIPTORS[promptConfig.bgStrategy].tip }}
+                  </p>
+                </div>
+
+                <div class="border-t border-neutral-500/15 pt-3">
+                  <span class="text-xs font-black">配文合成方案：</span>
+                  <div class="mt-1.5 grid grid-cols-2 gap-2">
+                    <button
+                      @click="promptConfig.textStrategy = 'studio-vector'"
+                      class="rounded-lg border p-2 text-left text-[11px] font-bold transition"
+                      :class="
+                        promptConfig.textStrategy === 'studio-vector'
+                          ? 'border-[#07C160] bg-[#07C160]/15 text-[#07C160]'
+                          : 'border-neutral-500/20 text-[#8A919E]'
+                      "
+                    >
+                      <div>★ 推荐：AI 纯图无字</div>
+                      <div class="text-[9px] opacity-80">0乱码！切图自动打下方矢量花字</div>
+                    </button>
+                    <button
+                      @click="promptConfig.textStrategy = 'ai-native'"
+                      class="rounded-lg border p-2 text-left text-[11px] font-bold transition"
+                      :class="
+                        promptConfig.textStrategy === 'ai-native'
+                          ? 'border-[#07C160] bg-[#07C160]/15 text-[#07C160]'
+                          : 'border-neutral-500/20 text-[#8A919E]'
+                      "
+                    >
+                      <div>AI 原生带字直出</div>
+                      <div class="text-[9px] opacity-80">适合豆包/即梦/GPT-4o直接画中文字</div>
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Step 4: 9-Grid Storyboard Editor & Multi-Batch 16/24 Sequencer -->
+            <div
+              class="rounded-xl border p-4"
+              :class="studioTheme === 'dark' ? 'border-[#222631] bg-[#0C0D10]' : 'border-[#E5E2D9] bg-[#FAF9F5]'"
+            >
+              <div class="mb-3 flex flex-wrap items-center justify-between gap-2">
+                <div class="flex items-center gap-2">
+                  <span class="text-xs font-black">STEP 4 · 九宫格分镜动作与配文剧本 (分批连贯生成轻松凑齐 16/24 张)</span>
+                </div>
+                <label class="flex cursor-pointer items-center gap-1.5 text-xs font-bold text-[#FF5A36]">
+                  <input type="checkbox" v-model="promptConfig.isFollowUpTurn" class="accent-[#FF5A36]" />
+                  <span>开启「第 2/3 张多轮对话续画锁脸模式」</span>
+                </label>
+              </div>
+
+              <!-- Batch Preset Selector -->
+              <div class="mb-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
+                <button
+                  v-for="batch in STORYBOARD_BATCH_PRESETS"
+                  :key="batch.id"
+                  @click="selectStoryboardBatch(batch.id)"
+                  class="flex flex-col items-start rounded-xl border p-2.5 text-left transition"
+                  :class="
+                    activeBatchId === batch.id
+                      ? 'border-[#07C160] bg-[#07C160]/15'
+                      : 'border-neutral-500/20 hover:border-neutral-500/40'
+                  "
+                >
+                  <div class="flex w-full items-center justify-between gap-2">
+                    <span class="text-xs font-black">{{ batch.label }}</span>
+                    <span class="shrink-0 whitespace-nowrap rounded bg-[#07C160]/20 px-1.5 py-0.5 text-[9px] font-black text-[#07C160]">{{ batch.badge }}</span>
+                  </div>
+                  <span class="mt-1 text-[10px] text-[#8A919E]">{{ batch.desc }}</span>
+                </button>
+              </div>
+
+              <!-- 3x3 Editable Cells Grid -->
+              <div class="grid grid-cols-1 gap-2.5 sm:grid-cols-3">
+                <div
+                  v-for="cell in promptConfig.cells"
+                  :key="cell.index"
+                  class="flex flex-col gap-1.5 rounded-lg border border-neutral-500/20 bg-neutral-500/5 p-2.5"
+                >
+                  <div class="flex items-center justify-between gap-2">
+                    <span class="font-mono-num rounded bg-[#FF5A36]/20 px-1.5 py-0.5 text-[10px] font-black text-[#FF5A36]">
+                      格子 #0{{ cell.index }}
+                    </span>
+                    <input
+                      v-model="cell.caption"
+                      type="text"
+                      placeholder="贴纸配文"
+                      class="w-28 rounded border border-[#07C160]/40 bg-transparent px-2 py-0.5 text-right text-xs font-black text-[#07C160] outline-none"
+                    />
+                  </div>
+                  <input
+                    v-model="cell.actionZh"
+                    type="text"
+                    placeholder="输入该格子的具体表情与肢体动作..."
+                    class="w-full rounded border border-neutral-500/25 bg-transparent px-2 py-1 text-[11px] outline-none focus:border-[#07C160]"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <!-- Step 5: Compiled Master Prompt Output & 3-Step Action Guide -->
+            <div
+              class="rounded-xl border border-[#07C160]/40 bg-[#07C160]/5 p-4"
+            >
+              <div class="mb-2 flex flex-wrap items-center justify-between gap-2">
+                <div class="flex items-center gap-2">
+                  <span class="h-2 w-2 rounded-full bg-[#07C160]"></span>
+                  <h3 class="text-xs font-black uppercase tracking-wider text-[#07C160]">
+                    已为您实时编译的专属母版指令 ({{ promptConfig.platform.toUpperCase() }})
+                  </h3>
+                </div>
+                <div class="flex items-center gap-2">
+                  <button
+                    v-if="compiledPromptResult.negativePrompt"
+                    @click="copyPromptText(compiledPromptResult.negativePrompt, 'Negative Prompt 反向词')"
+                    class="rounded-lg border border-neutral-500/30 px-3 py-1 text-xs font-bold hover:border-[#FF5A36]"
+                  >
+                    复制反向词 (Negative)
+                  </button>
+                  <button
+                    @click="copyAndSyncPromptToSlicer"
+                    class="rounded-lg bg-[#07C160] px-4 py-1.5 text-xs font-black text-[#04150B] transition hover:bg-[#06AD56]"
+                  >
+                    📋 复制此指令并绑定配文
+                  </button>
+                </div>
+              </div>
+
+              <pre
+                class="max-h-56 overflow-y-auto whitespace-pre-wrap rounded-lg border border-neutral-500/20 bg-black/40 p-3.5 font-mono text-xs leading-relaxed text-[#E5E7EB]"
+              >{{ compiledPromptResult.mainPrompt }}</pre>
+
+              <!-- Minimalist Transport Checklist -->
+              <div class="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
+                <div
+                  v-for="(stepTxt, sIdx) in compiledPromptResult.workflowChecklist"
+                  :key="sIdx"
+                  class="flex items-start gap-2 rounded-lg border border-neutral-500/15 bg-black/20 p-2.5 text-[11px]"
+                >
+                  <span class="font-mono-num rounded bg-[#07C160] px-1.5 py-0.2 text-[10px] font-black text-[#04150B]">
+                    0{{ sIdx + 1 }}
+                  </span>
+                  <span class="leading-snug text-[#A0A7B5]">{{ stepTxt }}</span>
+                </div>
               </div>
             </div>
           </section>
