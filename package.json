@@ -1,8 +1,8 @@
 {
-  "name": "westicker-pro",
-  "version": "1.0.0",
-  "description": "A pure frontend extremely fast packing factory for WeChat Sticker Platform.",
-  "author": "StickerFlow Studio",
+  "name": "westicker-studio-pro",
+  "version": "2.0.0",
+  "description": "WeSticker Studio 2.0 - AI-Native WeChat Sticker Engineering, Sprite Slicing, Die-Cut Crafting & Live Device Simulation Workbench",
+  "author": "WeSticker Architecture Team",
   "private": true,
   "type": "module",
   "scripts": {
@@ -13,21 +13,18 @@
   "dependencies": {
     "file-saver": "^2.0.5",
     "jszip": "^3.10.1",
-    "vue": "^3.5.32",
-    "vue-cropper": "^0.6.5",
-    "vue-draggable-plus": "^0.6.1"
+    "lucide-vue-next": "^0.475.0",
+    "vue": "^3.5.13",
+    "vue-cropper": "^1.1.4",
+    "vue-draggable-plus": "^0.6.0"
   },
   "devDependencies": {
-    "@tailwindcss/vite": "^4.2.2",
+    "@tailwindcss/vite": "^4.0.6",
     "@types/file-saver": "^2.0.7",
-    "@types/node": "^24.12.2",
-    "@vitejs/plugin-vue": "^6.0.5",
-    "@vue/tsconfig": "^0.9.1",
-    "autoprefixer": "^10.5.0",
-    "postcss": "^8.5.10",
-    "tailwindcss": "^4.2.2",
-    "typescript": "~6.0.2",
-    "vite": "^8.0.4",
-    "vue-tsc": "^3.2.6"
+    "@vitejs/plugin-vue": "^5.2.1",
+    "tailwindcss": "^4.0.6",
+    "typescript": "~5.7.2",
+    "vite": "^6.1.0",
+    "vue-tsc": "^2.2.2"
   }
 }

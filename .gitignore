@@ -11,6 +11,7 @@ node_modules
 dist
 dist-ssr
 *.local
+.gitkeep
 
 # Editor directories and files
 .vscode/*
@@ -23,13 +24,8 @@ dist-ssr
 *.sln
 *.sw?
 
-# Environments
+# Environment & Local Archives
 .env
-.env.local
-.env.development.local
-.env.test.local
-.env.production.local
-
-# Archives produced by local exports
+.env.*
+!.env.example
 *.zip
-*.tar.gz

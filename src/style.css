@@ -1,70 +1,84 @@
 @import "tailwindcss";
 
-:root {
-  font-family: ui-sans-serif, "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", system-ui, sans-serif;
-  line-height: 1.5;
-  font-weight: 400;
-  color: #17211d;
-  background: #f7fbf6;
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
+@layer base {
+  :root {
+    --bg-canvas: #0C0D10;
+    --bg-panel: #13151A;
+    --bg-slot: #090A0D;
+    --border-hairline: #222631;
+    --text-primary: #F3F4F6;
+    --text-muted: #8A919E;
+    --accent-wechat: #07C160;
+    --accent-craft: #FF5A36;
+  }
+
+  body {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+    overflow-x: hidden;
+  }
+
+  .font-mono-num {
+    font-family: 'JetBrains Mono', 'Fira Code', 'SFMono-Regular', Consolas, monospace;
+    font-variant-numeric: tabular-nums;
+  }
 }
 
-* {
-  box-sizing: border-box;
+/* Precision Cutting Mat Grid Pattern */
+.cutting-mat-dark {
+  background-color: #090A0D;
+  background-image: 
+    linear-gradient(to right, rgba(255, 255, 255, 0.03) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(255, 255, 255, 0.03) 1px, transparent 1px),
+    linear-gradient(to right, rgba(255, 255, 255, 0.06) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(255, 255, 255, 0.06) 1px, transparent 1px);
+  background-size: 12px 12px, 12px 12px, 60px 60px, 60px 60px;
 }
 
-html {
-  min-height: 100%;
-  background:
-    linear-gradient(90deg, rgba(17, 195, 106, 0.05) 1px, transparent 1px),
-    linear-gradient(180deg, rgba(17, 195, 106, 0.05) 1px, transparent 1px),
-    #f7fbf6;
-  background-size: 36px 36px;
+.cutting-mat-light {
+  background-color: #F4F2EC;
+  background-image: 
+    linear-gradient(to right, rgba(20, 25, 35, 0.04) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(20, 25, 35, 0.04) 1px, transparent 1px),
+    linear-gradient(to right, rgba(20, 25, 35, 0.08) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(20, 25, 35, 0.08) 1px, transparent 1px);
+  background-size: 12px 12px, 12px 12px, 60px 60px, 60px 60px;
 }
 
-body {
-  margin: 0;
-  min-height: 100vh;
+/* Alpha Checkerboard for Sticker Transparency Inspection */
+.alpha-checkerboard-dark {
+  background-color: #12141C;
+  background-image:
+    linear-gradient(45deg, #1A1D28 25%, transparent 25%),
+    linear-gradient(-45deg, #1A1D28 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, #1A1D28 75%),
+    linear-gradient(-45deg, transparent 75%, #1A1D28 75%);
+  background-size: 16px 16px;
+  background-position: 0 0, 0 8px, 8px -8px, -8px 0;
 }
 
-button,
-input {
-  font: inherit;
+.alpha-checkerboard-light {
+  background-color: #FFFFFF;
+  background-image:
+    linear-gradient(45deg, #E6E8EC 25%, transparent 25%),
+    linear-gradient(-45deg, #E6E8EC 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, #E6E8EC 75%),
+    linear-gradient(-45deg, transparent 75%, #E6E8EC 75%);
+  background-size: 16px 16px;
+  background-position: 0 0, 0 8px, 8px -8px, -8px 0;
 }
 
-button {
-  -webkit-tap-highlight-color: transparent;
-}
-
-img {
-  display: block;
-}
-
-#app {
-  min-height: 100vh;
-}
-
+/* Custom sleek scrollbars */
 ::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
+  width: 6px;
+  height: 6px;
 }
-
 ::-webkit-scrollbar-track {
   background: transparent;
 }
-
 ::-webkit-scrollbar-thumb {
-  background: #c7d9cf;
-  border: 3px solid transparent;
-  border-radius: 999px;
-  background-clip: content-box;
+  background: rgba(138, 145, 158, 0.25);
+  border-radius: 9999px;
 }
-
 ::-webkit-scrollbar-thumb:hover {
-  background: #9ccab1;
-  border: 3px solid transparent;
-  background-clip: content-box;
+  background: rgba(138, 145, 158, 0.45);
 }
