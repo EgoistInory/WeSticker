@@ -126,6 +126,10 @@ interface StickerItem {
   canvas: HTMLCanvasElement
   bleedPassed: boolean
   sizeKB: string
+  /** Per-sticker override: null = follow global craftOpts.removeBg, true = force on, false = force off */
+  customRemoveBg?: boolean | null
+  /** Per-sticker manual brush repair mask (+1 = restore original pixel, -1 = force transparent) */
+  repairMaskData?: Int8Array | null
 }
 
 const mainStickers = ref<StickerItem[]>([])
@@ -174,8 +178,9 @@ const slicerPreviewUrl = ref('')
 const slicerRows = ref(3)
 const slicerCols = ref(3)
 const slicerTrim = ref(4)
+const slicerOuterMargin = ref(0)
 const slicerAutoRemoveBg = ref(true)
-const slicerTolerance = ref(32)
+const slicerTolerance = ref(24)
 const slicerAutoCenter = ref(true)
 const slicerBgAlgorithm = ref<'flood-fill' | 'global'>('flood-fill')
 const slicerDefaultCaptions = ref<string[]>(
@@ -338,20 +343,30 @@ const buildStickerItem = async (
   rawSource: Blob | File,
   name: string,
   caption: string,
-  existingId?: string
+  existingId?: string,
+  customRemoveBg: boolean | null = null,
+  repairMaskData: Int8Array | null = null
 ): Promise<StickerItem> => {
   const { w: mw, padding: mp } = sysSpecs.value.main
   const { w: tw, padding: tp } = sysSpecs.value.thumb
 
+  const effectiveRemoveBg =
+    customRemoveBg !== null && customRemoveBg !== undefined
+      ? customRemoveBg
+      : craftOpts.value.removeBg
+
   const itemCraft: StickerCraftOptions = {
     ...craftOpts.value,
+    removeBg: effectiveRemoveBg,
     caption,
+    repairMaskData,
   }
 
   const resMain = await processTransparentSticker(rawSource, mw, mp, itemCraft)
   const resThumb = await processTransparentSticker(rawSource, tw, tp, {
     ...itemCraft,
     motion: 'static',
+    repairMaskData: null,
   })
 
   const activePayload = craftOpts.value.exportFormat === 'gif89a' ? resMain.gifBlob : resMain.blob
@@ -369,6 +384,8 @@ const buildStickerItem = async (
     canvas: resMain.canvas,
     bleedPassed: resMain.bleedAudit.passed,
     sizeKB: (activePayload.size / 1024).toFixed(1),
+    customRemoveBg,
+    repairMaskData,
   }
 }
 
@@ -377,14 +394,150 @@ const revokeStickerUrls = (item: StickerItem) => {
   if (item.gifPreviewUrl) URL.revokeObjectURL(item.gifPreviewUrl)
 }
 
-// Re-process a single sticker when its caption or global craft option changes
+// Re-process a single sticker when its caption or per-sticker override changes
 const updateSingleStickerCaption = async (item: StickerItem, newCaption: string) => {
   item.caption = newCaption
-  const updated = await buildStickerItem(item.rawSource, item.name, newCaption, item.id)
+  const updated = await buildStickerItem(
+    item.rawSource,
+    item.name,
+    newCaption,
+    item.id,
+    item.customRemoveBg ?? null,
+    item.repairMaskData ?? null
+  )
   const idx = mainStickers.value.findIndex((s) => s.id === item.id)
   if (idx !== -1) {
     revokeStickerUrls(mainStickers.value[idx])
     mainStickers.value[idx] = updated
+  }
+}
+
+// Toggle per-sticker background removal on/off for special cases (e.g. a specific Panda sticker)
+const toggleSingleStickerRemoveBg = async (item: StickerItem) => {
+  const currentEffective =
+    item.customRemoveBg !== null && item.customRemoveBg !== undefined
+      ? item.customRemoveBg
+      : craftOpts.value.removeBg
+  const nextState = !currentEffective
+  const updated = await buildStickerItem(
+    item.rawSource,
+    item.name,
+    item.caption,
+    item.id,
+    nextState,
+    item.repairMaskData ?? null
+  )
+  const idx = mainStickers.value.findIndex((s) => s.id === item.id)
+  if (idx !== -1) {
+    revokeStickerUrls(mainStickers.value[idx])
+    mainStickers.value[idx] = updated
+    triggerToast(
+      nextState
+        ? `已为「${item.name}」单独开启智能去背`
+        : `已为「${item.name}」单独关闭去背（100%保留原始白脸与细节）`
+    )
+  }
+}
+
+// === Interactive Brush Repair Studio Modal State ===
+const showRepairModal = ref(false)
+const repairTargetId = ref('')
+const repairBrushMode = ref<'restore' | 'erase'>('restore')
+const repairBrushSize = ref(18)
+const isPaintingRepair = ref(false)
+const repairCanvasRef = ref<HTMLCanvasElement | null>(null)
+
+const repairTargetItem = computed(() =>
+  mainStickers.value.find((s) => s.id === repairTargetId.value) || null
+)
+
+const openRepairModal = async (item: StickerItem) => {
+  repairTargetId.value = item.id
+  repairBrushMode.value = 'restore'
+  showRepairModal.value = true
+  await nextTick()
+  renderRepairPreviewCanvas()
+}
+
+const renderRepairPreviewCanvas = () => {
+  const c = repairCanvasRef.value
+  const item = repairTargetItem.value
+  if (!c || !item) return
+  const ctx = c.getContext('2d')!
+  ctx.clearRect(0, 0, c.width, c.height)
+  ctx.drawImage(item.canvas, 0, 0, c.width, c.height)
+}
+
+const paintOnRepairCanvas = async (e: MouseEvent) => {
+  if (!isPaintingRepair.value) return
+  const c = repairCanvasRef.value
+  const item = repairTargetItem.value
+  if (!c || !item) return
+
+  const rect = c.getBoundingClientRect()
+  const targetSize = sysSpecs.value.main.w
+  const scaleX = targetSize / rect.width
+  const scaleY = targetSize / rect.height
+  const cx = Math.round((e.clientX - rect.left) * scaleX)
+  const cy = Math.round((e.clientY - rect.top) * scaleY)
+  const radius = Math.max(2, Math.round(repairBrushSize.value / 2))
+
+  if (!item.repairMaskData || item.repairMaskData.length !== targetSize * targetSize) {
+    item.repairMaskData = new Int8Array(targetSize * targetSize)
+  }
+
+  const val = repairBrushMode.value === 'restore' ? 1 : -1
+  for (let y = Math.max(0, cy - radius); y <= Math.min(targetSize - 1, cy + radius); y++) {
+    for (let x = Math.max(0, cx - radius); x <= Math.min(targetSize - 1, cx + radius); x++) {
+      if ((x - cx) * (x - cx) + (y - cy) * (y - cy) <= radius * radius) {
+        item.repairMaskData[y * targetSize + x] = val
+      }
+    }
+  }
+
+  // Re-render sticker with updated mask
+  const updated = await buildStickerItem(
+    item.rawSource,
+    item.name,
+    item.caption,
+    item.id,
+    item.customRemoveBg ?? null,
+    item.repairMaskData
+  )
+  const idx = mainStickers.value.findIndex((s) => s.id === item.id)
+  if (idx !== -1) {
+    revokeStickerUrls(mainStickers.value[idx])
+    mainStickers.value[idx] = updated
+    renderRepairPreviewCanvas()
+  }
+}
+
+const startRepairPaint = (e: MouseEvent) => {
+  isPaintingRepair.value = true
+  paintOnRepairCanvas(e)
+}
+
+const stopRepairPaint = () => {
+  isPaintingRepair.value = false
+}
+
+const resetSingleStickerRepairMask = async () => {
+  const item = repairTargetItem.value
+  if (!item) return
+  const updated = await buildStickerItem(
+    item.rawSource,
+    item.name,
+    item.caption,
+    item.id,
+    item.customRemoveBg ?? null,
+    null
+  )
+  const idx = mainStickers.value.findIndex((s) => s.id === item.id)
+  if (idx !== -1) {
+    revokeStickerUrls(mainStickers.value[idx])
+    mainStickers.value[idx] = updated
+    renderRepairPreviewCanvas()
+    triggerToast('已重置手涂修补蒙版')
   }
 }
 
@@ -395,12 +548,19 @@ const applyCraftToAllStickers = async () => {
   try {
     const updatedList: StickerItem[] = []
     for (const item of mainStickers.value) {
-      const updated = await buildStickerItem(item.rawSource, item.name, item.caption, item.id)
+      const updated = await buildStickerItem(
+        item.rawSource,
+        item.name,
+        item.caption,
+        item.id,
+        item.customRemoveBg ?? null,
+        item.repairMaskData ?? null
+      )
       revokeStickerUrls(item)
       updatedList.push(updated)
     }
     mainStickers.value = updatedList
-    triggerToast(`已完成 ${updatedList.length} 张主图刀模白边与编码重算`)
+    triggerToast(`已完成 ${updatedList.length} 张主图刀模白边与护脸去背重算`)
   } finally {
     isBatchCrafting.value = false
   }
@@ -637,6 +797,12 @@ const executeSpriteSheetSlice = async (mode: 'replace' | 'append' = 'replace') =
   if (!slicerSourceBlob.value || isSlicing.value) return
   isSlicing.value = true
   try {
+    // Sync Slicer background removal settings to the non-destructive Matrix craft pipeline!
+    craftOpts.value.removeBg = slicerAutoRemoveBg.value
+    craftOpts.value.bgTolerance = slicerTolerance.value
+    craftOpts.value.bgAlgorithm = slicerBgAlgorithm.value
+    craftOpts.value.protectInteriorWhites = true
+
     const cells = await sliceSpriteSheet(
       slicerSourceBlob.value,
       slicerRows.value,
@@ -645,7 +811,8 @@ const executeSpriteSheetSlice = async (mode: 'replace' | 'append' = 'replace') =
       slicerAutoRemoveBg.value,
       slicerTolerance.value,
       slicerAutoCenter.value,
-      slicerBgAlgorithm.value
+      slicerBgAlgorithm.value,
+      slicerOuterMargin.value
     )
 
     if (mode === 'replace') {
@@ -1371,7 +1538,7 @@ onUnmounted(() => {
                 </div>
               </div>
 
-              <!-- Control 2: Smart Chroma Key Background Removal -->
+              <!-- Control 2: Smart Chroma Key & Panda White-Face Shield -->
               <div
                 class="rounded-xl border p-3"
                 :class="studioTheme === 'dark' ? 'border-[#1E222D] bg-[#0C0D10]' : 'border-[#E5E2D9] bg-[#F8F7F3]'"
@@ -1379,13 +1546,13 @@ onUnmounted(() => {
                 <div class="flex items-center justify-between text-xs font-bold">
                   <label class="flex cursor-pointer items-center gap-1.5">
                     <input type="checkbox" v-model="craftOpts.removeBg" @change="applyCraftToAllStickers" class="accent-[#07C160]" />
-                    <span>智能色度去背 (抠图)</span>
+                    <span>智能去背 (非破坏性)</span>
                   </label>
                   <span class="font-mono-num text-[11px] text-[#8A919E]">容差 {{ craftOpts.bgTolerance }}</span>
                 </div>
                 <input
                   type="range"
-                  min="5"
+                  min="2"
                   max="75"
                   step="1"
                   :disabled="!craftOpts.removeBg"
@@ -1393,14 +1560,25 @@ onUnmounted(() => {
                   @change="applyCraftToAllStickers"
                   class="mt-2 w-full accent-[#07C160] disabled:opacity-40"
                 />
-                <div class="mt-1.5 flex items-center justify-between text-[10px] text-[#8A919E]">
-                  <span>采样:</span>
+                <div class="mt-1.5 flex items-center justify-between text-[10px]">
+                  <label
+                    class="flex cursor-pointer items-center gap-1 font-bold text-[#07C160]"
+                    title="开启后通过四向轮廓包围盒与形态学膨胀封口，严防白底上的熊猫白脸/白眼被漫水抠穿！"
+                  >
+                    <input
+                      type="checkbox"
+                      v-model="craftOpts.protectInteriorWhites"
+                      @change="applyCraftToAllStickers"
+                      class="accent-[#07C160]"
+                    />
+                    <span>🐼 护白脸防漏盾</span>
+                  </label>
                   <select
                     v-model="craftOpts.bgKeyMode"
                     @change="applyCraftToAllStickers"
-                    class="rounded border border-neutral-500/30 bg-transparent px-1.5 py-0.5 text-[10px] font-bold"
+                    class="rounded border border-neutral-500/30 bg-transparent px-1 py-0.5 text-[10px] font-bold text-[#8A919E]"
                   >
-                    <option value="auto-corner" class="bg-[#13151A] text-white">四角自动吸色</option>
+                    <option value="auto-corner" class="bg-[#13151A] text-white">八点自动吸色</option>
                     <option value="white" class="bg-[#13151A] text-white">纯白底 (#FFF)</option>
                     <option value="green" class="bg-[#13151A] text-white">绿幕 (#0F0)</option>
                   </select>
@@ -1572,6 +1750,25 @@ onUnmounted(() => {
                         {{ item.sizeKB }}KB
                       </span>
                       <button
+                        @click.stop="toggleSingleStickerRemoveBg(item)"
+                        class="rounded px-1.5 py-0.5 text-[10px] font-bold transition"
+                        :class="
+                          item.customRemoveBg === false
+                            ? 'bg-amber-500/25 text-amber-300'
+                            : 'bg-neutral-500/15 opacity-0 hover:bg-[#07C160]/25 hover:text-[#07C160] group-hover:opacity-100'
+                        "
+                        title="单独开关此张贴纸的去背（若白脸角色线条未闭合被误抠，点此一键恢复原图白脸！）"
+                      >
+                        {{ item.customRemoveBg === false ? '已免抠' : '免抠' }}
+                      </button>
+                      <button
+                        @click.stop="openRepairModal(item)"
+                        class="rounded bg-[#FF5A36]/20 px-1.5 py-0.5 text-[10px] font-bold text-[#FF5A36] opacity-0 transition hover:bg-[#FF5A36] hover:text-white group-hover:opacity-100"
+                        title="打开涂抹修补画笔：手涂恢复被误抠的白脸或擦除杂边"
+                      >
+                        🖌️修补
+                      </button>
+                      <button
                         @click.stop="setStickerAsCover(item)"
                         class="rounded bg-neutral-500/15 px-1.5 py-0.5 text-[10px] font-bold opacity-0 transition hover:bg-[#07C160] hover:text-black group-hover:opacity-100"
                         title="设为详情页封面图"
@@ -1675,12 +1872,19 @@ onUnmounted(() => {
                 </p>
               </div>
 
-              <div class="flex items-center gap-2">
+              <div class="flex flex-wrap items-center gap-2">
+                <button
+                  @click="loadDemoSpriteSheet('panda')"
+                  class="rounded-lg border border-amber-400/50 bg-amber-500/15 px-3 py-1.5 text-xs font-black text-amber-300 transition hover:bg-amber-500/25"
+                  title="生成含线条断口的纯白底+纯白脸熊猫九宫格，实测【护白脸防漏盾】不伤白脸！"
+                >
+                  🐼 生成白底熊猫九宫格 (护脸测试)
+                </button>
                 <button
                   @click="loadDemoSpriteSheet('capybara')"
                   class="rounded-lg border border-[#07C160]/40 bg-[#07C160]/10 px-3 py-1.5 text-xs font-bold text-[#07C160] transition hover:bg-[#07C160]/20"
                 >
-                  ✦ 生成 3×3 九宫格测试大图
+                  ✦ 生成水豚九宫格测试图
                 </button>
                 <label
                   for="sprite-sheet-upload"
@@ -1787,11 +1991,19 @@ onUnmounted(() => {
                     :class="studioTheme === 'dark' ? 'border-[#222631] bg-[#0C0D10]' : 'border-[#E5E2D9] bg-[#F8F7F3]'"
                   >
                     <div class="flex items-center justify-between text-xs font-bold">
-                      <span>2. 单格边缘内缩裁切 (Trim Margin)</span>
-                      <span class="font-mono-num text-[#07C160]">{{ slicerTrim }}%</span>
+                      <span>2. 单格内缩 (Trim) &amp; 整图外框切除</span>
+                      <span class="font-mono-num text-[#07C160]">内缩 {{ slicerTrim }}% · 外框 {{ slicerOuterMargin }}%</span>
                     </div>
-                    <input type="range" min="0" max="15" step="1" v-model.number="slicerTrim" class="mt-2 w-full accent-[#07C160]" />
-                    <p class="mt-1 text-[11px] text-[#8A919E]">自动切除 AI 生成网格线与相邻格子的残影杂边</p>
+                    <div class="mt-2 grid grid-cols-2 gap-3">
+                      <label class="flex flex-col gap-1 text-[10px] text-[#8A919E]">
+                        <span>单格内缩 (切掉格子分割黑线)</span>
+                        <input type="range" min="0" max="15" step="1" v-model.number="slicerTrim" class="w-full accent-[#07C160]" />
+                      </label>
+                      <label class="flex flex-col gap-1 text-[10px] text-[#8A919E]">
+                        <span>整图外框留白切除 (防偏移)</span>
+                        <input type="range" min="0" max="12" step="1" v-model.number="slicerOuterMargin" class="w-full accent-[#FF5A36]" />
+                      </label>
+                    </div>
                   </div>
 
                   <div
@@ -2754,6 +2966,143 @@ onUnmounted(() => {
           >
             确认裁切并压制体积
           </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ======================================================= -->
+    <!-- MODAL 3: INTERACTIVE BRUSH REPAIR & SINGLE OVERRIDE     -->
+    <!-- ======================================================= -->
+    <div
+      v-if="showRepairModal && repairTargetItem"
+      class="fixed inset-0 z-[115] flex items-center justify-center bg-black/80 p-4 backdrop-blur-md"
+      @mouseup="stopRepairPaint"
+    >
+      <div class="flex w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-[#2B3040] bg-[#13151A] text-white shadow-2xl">
+        <div class="flex items-center justify-between border-b border-[#222631] px-5 py-4">
+          <div>
+            <div class="flex items-center gap-2">
+              <span class="rounded bg-[#FF5A36] px-2 py-0.5 text-[10px] font-black text-white">MASK REPAIR LAB</span>
+              <h3 class="text-base font-black">单张精修与手涂救脸画笔 · {{ repairTargetItem.name }}</h3>
+            </div>
+            <p class="mt-0.5 text-xs text-[#8A919E]">
+              若个别熊猫/白色角色因线条未闭合导致白脸被误抠，可直接在此用【恢复画笔】涂抹找回，或单独关闭本张抠图！
+            </p>
+          </div>
+          <button
+            @click="showRepairModal = false"
+            class="rounded-lg border border-neutral-700 px-3 py-1 text-xs font-bold hover:bg-neutral-800"
+          >
+            ✓ 完成精修
+          </button>
+        </div>
+
+        <div class="grid grid-cols-1 gap-5 p-5 md:grid-cols-12">
+          <!-- Left: 2x Zoom Interactive Paint Canvas -->
+          <div class="flex flex-col items-center justify-center md:col-span-7">
+            <div
+              class="alpha-checkerboard-dark relative overflow-hidden rounded-xl border-2 border-[#07C160]/60 shadow-inner"
+              style="width: 320px; height: 320px;"
+            >
+              <canvas
+                ref="repairCanvasRef"
+                :width="sysSpecs.main.w"
+                :height="sysSpecs.main.w"
+                @mousedown="startRepairPaint"
+                @mousemove="paintOnRepairCanvas"
+                @mouseup="stopRepairPaint"
+                @mouseleave="stopRepairPaint"
+                class="h-full w-full cursor-crosshair object-contain"
+              ></canvas>
+            </div>
+            <span class="mt-2 text-[11px] text-[#8A919E]">
+              在上方画布按住鼠标左键直接涂抹 · 4px 刀模白边将跟随您的笔触实时重算
+            </span>
+          </div>
+
+          <!-- Right: Brush Controls & Single-Sticker Override -->
+          <div class="flex flex-col justify-between gap-4 md:col-span-5">
+            <div class="space-y-3.5 text-xs">
+              <!-- Quick Single-Sticker Mode -->
+              <div class="rounded-xl border border-[#222631] bg-[#0C0D10] p-3.5">
+                <div class="mb-2 font-black text-[#07C160]">1. 本张贴纸独立去背开关</div>
+                <button
+                  @click="toggleSingleStickerRemoveBg(repairTargetItem); nextTick(renderRepairPreviewCanvas)"
+                  class="w-full rounded-lg border py-2 text-xs font-black transition"
+                  :class="
+                    repairTargetItem.customRemoveBg === false
+                      ? 'border-amber-400 bg-amber-500/20 text-amber-300'
+                      : 'border-[#07C160] bg-[#07C160]/15 text-[#07C160]'
+                  "
+                >
+                  {{
+                    repairTargetItem.customRemoveBg === false
+                      ? '当前：已单独关闭去背 (100%保留原始白底/白脸)'
+                      : '当前：开启智能去背 (点击可单独关闭本张去背)'
+                  }}
+                </button>
+              </div>
+
+              <!-- Brush Mode Selector -->
+              <div class="rounded-xl border border-[#222631] bg-[#0C0D10] p-3.5">
+                <div class="mb-2 font-black">2. 仙女棒局部涂抹模式</div>
+                <div class="grid grid-cols-2 gap-2">
+                  <button
+                    @click="repairBrushMode = 'restore'"
+                    class="rounded-lg border p-2.5 text-left transition"
+                    :class="
+                      repairBrushMode === 'restore'
+                        ? 'border-[#07C160] bg-[#07C160]/20 text-[#07C160]'
+                        : 'border-neutral-700 text-neutral-400'
+                    "
+                  >
+                    <div class="font-black">➕ 恢复画笔</div>
+                    <div class="mt-0.5 text-[10px] opacity-80">涂抹找回被误删的白脸/身体</div>
+                  </button>
+                  <button
+                    @click="repairBrushMode = 'erase'"
+                    class="rounded-lg border p-2.5 text-left transition"
+                    :class="
+                      repairBrushMode === 'erase'
+                        ? 'border-[#FF5A36] bg-[#FF5A36]/20 text-[#FF5A36]'
+                        : 'border-neutral-700 text-neutral-400'
+                    "
+                  >
+                    <div class="font-black">➖ 擦除橡皮</div>
+                    <div class="mt-0.5 text-[10px] opacity-80">涂抹擦掉残留背景死角</div>
+                  </button>
+                </div>
+
+                <div class="mt-3 flex items-center justify-between">
+                  <span class="text-[#8A919E]">笔刷直径</span>
+                  <span class="font-mono-num font-bold text-[#07C160]">{{ repairBrushSize }} px</span>
+                </div>
+                <input
+                  type="range"
+                  min="6"
+                  max="48"
+                  step="2"
+                  v-model.number="repairBrushSize"
+                  class="mt-1.5 w-full accent-[#07C160]"
+                />
+              </div>
+            </div>
+
+            <div class="flex flex-col gap-2">
+              <button
+                @click="resetSingleStickerRepairMask"
+                class="w-full rounded-lg border border-neutral-700 py-2 text-xs font-bold text-neutral-300 hover:bg-neutral-800"
+              >
+                ↺ 清空本张手涂修补记录
+              </button>
+              <button
+                @click="showRepairModal = false"
+                class="w-full rounded-lg bg-[#07C160] py-2.5 text-xs font-black text-[#04150B] hover:bg-[#06AD56]"
+              >
+                ✓ 确认保存此贴纸精修结果
+              </button>
+            </div>
+          </div>
         </div>
       </div>
     </div>

@@ -11,6 +11,10 @@ export interface StickerCraftOptions {
   bgKeyMode: 'auto-corner' | 'white' | 'green' | 'black';
   /** Background removal algorithm: 'flood-fill' protects internal whites; 'global' removes all matching color */
   bgAlgorithm?: 'flood-fill' | 'global';
+  /** Panda/White-Face Shield: protects light/white regions enclosed by dark character outlines & seals small line gaps */
+  protectInteriorWhites?: boolean;
+  /** Morphological gap-closing radius in px (1-6px) to prevent flood-fill leaking through broken line-art */
+  gapClosingPx?: number;
   /** Die-cut contour border width in px (0 = off, 1-12px) */
   strokeWidth: number;
   /** Die-cut contour border color (default #FFFFFF) */
@@ -21,24 +25,32 @@ export interface StickerCraftOptions {
   caption: string;
   /** Visual style preset for the meme caption */
   captionStyle: CaptionStyle;
+  /** Relative font size multiplier for caption (0.75 - 1.35) */
+  captionScale?: number;
   /** Motion preset for GIF89a export */
   motion: MotionPreset;
   /** Export binary format: 'gif89a' (real GIF binary) or 'png' */
   exportFormat: 'gif89a' | 'png';
+  /** Optional user-painted repair mask (+255 = force restore original pixel, -255 = force erase pixel) */
+  repairMaskData?: Int8Array | null;
 }
 
 export const DEFAULT_CRAFT_OPTIONS: StickerCraftOptions = {
-  removeBg: false,
-  bgTolerance: 28,
+  removeBg: true,
+  bgTolerance: 24,
   bgKeyMode: 'auto-corner',
   bgAlgorithm: 'flood-fill',
+  protectInteriorWhites: true,
+  gapClosingPx: 3,
   strokeWidth: 4,
   strokeColor: '#FFFFFF',
   dropShadow: true,
   caption: '',
   captionStyle: 'classic-white',
+  captionScale: 1.0,
   motion: 'static',
   exportFormat: 'gif89a',
+  repairMaskData: null,
 };
 
 export interface ProcessedStickerResult {
@@ -74,10 +86,10 @@ export const loadImage = (source: File | Blob | string): Promise<HTMLImageElemen
 };
 
 /**
- * Smart Chroma-Key & Edge-Connected Flood-Fill Background Removal with soft alpha feathering.
- * - 'flood-fill' (default): Starts from outer border pixels and only removes connected background,
- *   preserving white eyes, white clothes, or white fur inside the character silhouette!
- * - 'global': Removes all pixels matching the key color anywhere in the image.
+ * Smart Chroma-Key & Gap-Sealed Flood-Fill Background Removal with Panda/White-Face Interior Shield.
+ *
+ * Solves the classic AI sticker bug where white-faced characters (Pandas, White Cats, Bunnies, White Shirts)
+ * on white backgrounds get their faces hollowed out due to 1-5px line-art gaps or bottom-edge bust cutoffs!
  */
 function applySmartChromaKey(
   ctx: CanvasRenderingContext2D,
@@ -85,10 +97,13 @@ function applySmartChromaKey(
   height: number,
   mode: StickerCraftOptions['bgKeyMode'],
   tolerance: number,
-  algorithm: 'flood-fill' | 'global' = 'flood-fill'
+  algorithm: 'flood-fill' | 'global' = 'flood-fill',
+  protectInteriorWhites: boolean = true,
+  gapClosingPx: number = 3
 ) {
   const imgData = ctx.getImageData(0, 0, width, height);
   const data = imgData.data;
+  const totalPixels = width * height;
 
   let keyR = 255, keyG = 255, keyB = 255;
   if (mode === 'white') {
@@ -121,14 +136,14 @@ function applySmartChromaKey(
         }
       }
     }
-    if (count === 0) return; // Already transparent perimeter
+    if (count === 0) return; // Already transparent perimeter!
     keyR = Math.round(rSum / count);
     keyG = Math.round(gSum / count);
     keyB = Math.round(bSum / count);
   }
 
-  const maxDist = (tolerance / 100) * 220;
-  const featherRange = Math.max(12, maxDist * 0.35);
+  const maxDist = Math.max(4, (tolerance / 100) * 210);
+  const featherRange = Math.max(10, maxDist * 0.3);
 
   const colorDist = (pixelIndex: number): number => {
     const offset = pixelIndex * 4;
@@ -139,7 +154,130 @@ function applySmartChromaKey(
   };
 
   if (algorithm === 'flood-fill') {
-    const totalPixels = width * height;
+    // 1. Identify solid non-background "Wall" pixels (e.g. black outlines, ears, eyes, colored clothes)
+    const wallThreshold = Math.max(32, maxDist + 14);
+    const isHardWall = new Uint8Array(totalPixels);
+    for (let i = 0; i < totalPixels; i++) {
+      if (data[i * 4 + 3] > 90 && colorDist(i) > wallThreshold) {
+        isHardWall[i] = 1;
+      }
+    }
+
+    // 2. Build Morphological Gap-Closing Barrier + Bottom Bust Cut-Off Seal when protectInteriorWhites is enabled
+    const isProtectedInterior = new Uint8Array(totalPixels);
+    if (protectInteriorWhites) {
+      // 2a. Morphological Dilation Gap-Closing (radius r = 4px bridges up to 8px broken line-art gaps!)
+      const r = Math.max(2, Math.min(7, gapClosingPx));
+      const dilatedWall = new Uint8Array(totalPixels);
+      for (let y = 0; y < height; y++) {
+        const rOff = y * width;
+        for (let x = 0; x < width; x++) {
+          if (!isHardWall[rOff + x]) continue;
+          const y0 = Math.max(0, y - r);
+          const y1 = Math.min(height - 1, y + r);
+          const x0 = Math.max(0, x - r);
+          const x1 = Math.min(width - 1, x + r);
+          for (let ny = y0; ny <= y1; ny++) {
+            const nOff = ny * width;
+            for (let nx = x0; nx <= x1; nx++) {
+              dilatedWall[nOff + nx] = 1;
+            }
+          }
+        }
+      }
+
+      // 2b. Bottom Bust Cut-Off Seal: if a half-body character's left & right outlines reach near the bottom edge,
+      // seal the bottom border segment between them so flood-fill doesn't rush up through an open white shirt/neck!
+      let botMinX = width, botMaxX = -1;
+      for (let y = Math.max(0, height - 10); y < height; y++) {
+        const rOff = y * width;
+        for (let x = 0; x < width; x++) {
+          if (isHardWall[rOff + x]) {
+            if (x < botMinX) botMinX = x;
+            if (x > botMaxX) botMaxX = x;
+          }
+        }
+      }
+      if (botMaxX > botMinX && botMaxX - botMinX < width * 0.85) {
+        for (let y = Math.max(0, height - r - 1); y < height; y++) {
+          const rOff = y * width;
+          for (let x = botMinX; x <= botMaxX; x++) {
+            dilatedWall[rOff + x] = 1;
+          }
+        }
+      }
+
+      // 2c. Run Choked Flood-Fill from outer edges against `dilatedWall`
+      const outsideBg = new Uint8Array(totalPixels);
+      const q = new Int32Array(totalPixels);
+      let qH = 0, qT = 0;
+
+      const isBgCandidate = (idx: number): boolean => {
+        if (data[idx * 4 + 3] < 32) return true;
+        return colorDist(idx) <= maxDist;
+      };
+
+      const pushSeed = (x: number, y: number) => {
+        const idx = y * width + x;
+        if (outsideBg[idx] || dilatedWall[idx]) return;
+        if (isBgCandidate(idx)) {
+          outsideBg[idx] = 1;
+          q[qT++] = idx;
+        }
+      };
+
+      for (let x = 0; x < width; x++) {
+        pushSeed(x, 0);
+        pushSeed(x, height - 1);
+      }
+      for (let y = 1; y < height - 1; y++) {
+        pushSeed(0, y);
+        pushSeed(width - 1, y);
+      }
+
+      while (qH < qT) {
+        const curr = q[qH++];
+        const cx = curr % width;
+        const cy = (curr - cx) / width;
+
+        if (cx > 0) pushSeed(cx - 1, cy);
+        if (cx < width - 1) pushSeed(cx + 1, cy);
+        if (cy > 0) pushSeed(cx, cy - 1);
+        if (cy < height - 1) pushSeed(cx, cy + 1);
+      }
+
+      // 2d. Expand `outsideBg` back by `r + 1` steps ONLY into non-hard-wall pixels
+      // so the `r`-pixel dilation buffer right outside the black outline is cleanly removed too!
+      let currentWave = new Uint8Array(outsideBg);
+      for (let step = 0; step < r + 1; step++) {
+        const nextWave = new Uint8Array(currentWave);
+        for (let y = 0; y < height; y++) {
+          const rOff = y * width;
+          for (let x = 0; x < width; x++) {
+            const idx = rOff + x;
+            if (currentWave[idx] || isHardWall[idx]) continue;
+            const hasBgNeighbor =
+              (x > 0 && currentWave[idx - 1]) ||
+              (x < width - 1 && currentWave[idx + 1]) ||
+              (y > 0 && currentWave[idx - width]) ||
+              (y < height - 1 && currentWave[idx + width]);
+            if (hasBgNeighbor && colorDist(idx) <= maxDist + featherRange) {
+              nextWave[idx] = 1;
+            }
+          }
+        }
+        currentWave = nextWave;
+      }
+
+      // Any pixel NOT reached by `currentWave` is protected interior (Panda white face, white eyes, white shirt)!
+      for (let i = 0; i < totalPixels; i++) {
+        if (!currentWave[i]) {
+          isProtectedInterior[i] = 1;
+        }
+      }
+    }
+
+    // 3. Final Flood-Fill Alpha Extraction respecting `isProtectedInterior`
     const visited = new Uint8Array(totalPixels);
     const queue = new Int32Array(totalPixels);
     let head = 0;
@@ -147,7 +285,7 @@ function applySmartChromaKey(
 
     const tryEnqueue = (x: number, y: number) => {
       const idx = y * width + x;
-      if (visited[idx]) return;
+      if (visited[idx] || isProtectedInterior[idx]) return;
       const d = colorDist(idx);
       if (d <= maxDist + featherRange) {
         visited[idx] = 1;
@@ -155,7 +293,6 @@ function applySmartChromaKey(
       }
     };
 
-    // Seed all 4 outer edges
     for (let x = 0; x < width; x++) {
       tryEnqueue(x, 0);
       tryEnqueue(x, height - 1);
@@ -172,7 +309,6 @@ function applySmartChromaKey(
 
       if (d <= maxDist) {
         data[offset + 3] = 0;
-        // Only expand neighbors from core background pixels so we don't leak past outlines
         const cx = curr % width;
         const cy = (curr - cx) / width;
         if (cx > 0) tryEnqueue(cx - 1, cy);
@@ -197,6 +333,25 @@ function applySmartChromaKey(
       } else if (dist <= maxDist + featherRange) {
         const factor = (dist - maxDist) / featherRange;
         data[i + 3] = Math.round(data[i + 3] * factor);
+      }
+    }
+  }
+
+  // 4. Despeckle isolated 1-2px floating alpha dust islands so they don't grow into ugly white stroke blobs
+  const alphaCopy = new Uint8Array(totalPixels);
+  for (let i = 0; i < totalPixels; i++) alphaCopy[i] = data[i * 4 + 3];
+  for (let y = 1; y < height - 1; y++) {
+    const rOff = y * width;
+    for (let x = 1; x < width - 1; x++) {
+      const idx = rOff + x;
+      if (alphaCopy[idx] === 0) continue;
+      let solidNeighbors = 0;
+      if (alphaCopy[idx - 1] > 40) solidNeighbors++;
+      if (alphaCopy[idx + 1] > 40) solidNeighbors++;
+      if (alphaCopy[idx - width] > 40) solidNeighbors++;
+      if (alphaCopy[idx + width] > 40) solidNeighbors++;
+      if (solidNeighbors === 0) {
+        data[idx * 4 + 3] = 0;
       }
     }
   }
@@ -335,22 +490,61 @@ export const processTransparentSticker = async (
   const captionBias = opts.caption.trim() && targetSize >= 120 ? Math.round(targetSize * 0.045) : 0;
   const offsetY = Math.max(padding + effectiveStroke, Math.round((targetSize - drawH) / 2) - captionBias);
 
-  // Step 1: Draw subject on an isolated subject canvas
+  // Step 1: Run Smart Chroma-Key on the exact image bounds (drawW x drawH) BEFORE placing with inset offset!
+  // This ensures perimeter sampling and border flood-fill hit the true image edges rather than the 9px transparent inset!
+  const imgBoundCanvas = document.createElement('canvas');
+  imgBoundCanvas.width = drawW;
+  imgBoundCanvas.height = drawH;
+  const ibCtx = imgBoundCanvas.getContext('2d', { willReadFrequently: true })!;
+  ibCtx.drawImage(img, 0, 0, drawW, drawH);
+
+  if (opts.removeBg) {
+    applySmartChromaKey(
+      ibCtx,
+      drawW,
+      drawH,
+      opts.bgKeyMode,
+      opts.bgTolerance,
+      opts.bgAlgorithm || 'flood-fill',
+      opts.protectInteriorWhites ?? true,
+      opts.gapClosingPx ?? 4
+    );
+  }
+
+  // Keep an untouched raw copy at targetSize for manual brush restore
+  const rawSubjectCanvas = document.createElement('canvas');
+  rawSubjectCanvas.width = targetSize;
+  rawSubjectCanvas.height = targetSize;
+  const rawCtx = rawSubjectCanvas.getContext('2d', { willReadFrequently: true })!;
+  rawCtx.drawImage(img, offsetX, offsetY, drawW, drawH);
+
   const subjectCanvas = document.createElement('canvas');
   subjectCanvas.width = targetSize;
   subjectCanvas.height = targetSize;
   const sCtx = subjectCanvas.getContext('2d', { willReadFrequently: true })!;
-  sCtx.drawImage(img, offsetX, offsetY, drawW, drawH);
+  sCtx.drawImage(imgBoundCanvas, offsetX, offsetY);
 
-  if (opts.removeBg) {
-    applySmartChromaKey(
-      sCtx,
-      targetSize,
-      targetSize,
-      opts.bgKeyMode,
-      opts.bgTolerance,
-      opts.bgAlgorithm || 'flood-fill'
-    );
+  // Apply user-painted interactive Repair Mask (+1 = restore original pixel, -1 = erase to transparent)
+  if (opts.repairMaskData && opts.repairMaskData.length === targetSize * targetSize) {
+    const rawData = rawCtx.getImageData(0, 0, targetSize, targetSize).data;
+    const subImgData = sCtx.getImageData(0, 0, targetSize, targetSize);
+    const subData = subImgData.data;
+    const mask = opts.repairMaskData;
+
+    for (let i = 0; i < mask.length; i++) {
+      if (mask[i] > 0) {
+        // Restore original RGB + full alpha from raw un-keyed image!
+        const off = i * 4;
+        subData[off] = rawData[off];
+        subData[off + 1] = rawData[off + 1];
+        subData[off + 2] = rawData[off + 2];
+        subData[off + 3] = rawData[off + 3];
+      } else if (mask[i] < 0) {
+        // Force erase pixel
+        subData[i * 4 + 3] = 0;
+      }
+    }
+    sCtx.putImageData(subImgData, 0, 0);
   }
 
   // Step 2: Compose Die-Cut Contour Stroke + Shadow + Subject on final canvas
@@ -584,8 +778,12 @@ function cropToContentBoundingBox(
 }
 
 /**
- * AI Sprite Sheet Slicer:
- * Automatically slices a multi-grid AI sticker sheet (e.g., 3x3, 4x4, 4x6) into centered individual PNG files.
+ * AI Sprite Sheet Slicer (Non-Destructive Architecture):
+ * Slices a multi-grid AI sticker sheet (e.g., 3x3, 4x4, 4x6) into individual raw cell blobs.
+ * IMPORTANT: Saves the UN-KEYED raw cell image as `rawBlob` (using a temporary chroma-key pass only
+ * to compute the tight centering bounding-box if `autoCenterSubject` is enabled), so that downstream
+ * background removal, Panda White-Face Shield, tolerance tweaks, and Brush Repair in the Matrix
+ * are 100% NON-DESTRUCTIVE and reversible!
  */
 export const sliceSpriteSheet = async (
   file: File | Blob | string,
@@ -593,13 +791,19 @@ export const sliceSpriteSheet = async (
   cols: number,
   trimPercent: number = 4,
   autoRemoveBg: boolean = true,
-  tolerance: number = 30,
+  tolerance: number = 24,
   autoCenterSubject: boolean = true,
-  bgAlgorithm: 'flood-fill' | 'global' = 'flood-fill'
+  bgAlgorithm: 'flood-fill' | 'global' = 'flood-fill',
+  outerMarginPercent: number = 0
 ): Promise<{ blob: Blob; previewUrl: string; index: number }[]> => {
   const img = await loadImage(file);
-  const cellW = img.width / cols;
-  const cellH = img.height / rows;
+  const outerX = Math.round((img.width * outerMarginPercent) / 100);
+  const outerY = Math.round((img.height * outerMarginPercent) / 100);
+  const usableW = Math.max(32, img.width - outerX * 2);
+  const usableH = Math.max(32, img.height - outerY * 2);
+
+  const cellW = usableW / cols;
+  const cellH = usableH / rows;
   const results: { blob: Blob; previewUrl: string; index: number }[] = [];
 
   let index = 1;
@@ -607,27 +811,66 @@ export const sliceSpriteSheet = async (
     for (let c = 0; c < cols; c++) {
       const trimX = (cellW * trimPercent) / 100;
       const trimY = (cellH * trimPercent) / 100;
-      const sx = Math.round(c * cellW + trimX);
-      const sy = Math.round(r * cellH + trimY);
+      const sx = Math.round(outerX + c * cellW + trimX);
+      const sy = Math.round(outerY + r * cellH + trimY);
       const sw = Math.max(16, Math.round(cellW - trimX * 2));
       const sh = Math.max(16, Math.round(cellH - trimY * 2));
 
-      let cellCanvas = document.createElement('canvas');
-      cellCanvas.width = sw;
-      cellCanvas.height = sh;
-      const ctx = cellCanvas.getContext('2d', { willReadFrequently: true })!;
-      ctx.drawImage(img, sx, sy, sw, sh, 0, 0, sw, sh);
+      let rawCellCanvas = document.createElement('canvas');
+      rawCellCanvas.width = sw;
+      rawCellCanvas.height = sh;
+      const rawCtx = rawCellCanvas.getContext('2d', { willReadFrequently: true })!;
+      rawCtx.drawImage(img, sx, sy, sw, sh, 0, 0, sw, sh);
 
-      if (autoRemoveBg) {
-        applySmartChromaKey(ctx, sw, sh, 'auto-corner', tolerance, bgAlgorithm);
-      }
+      // If autoCenterSubject is on, detect bounding box on a temporary probe canvas
+      // and crop/center the RAW un-keyed canvas using the detected box + background fill!
+      if (autoCenterSubject) {
+        const probeCanvas = document.createElement('canvas');
+        probeCanvas.width = sw;
+        probeCanvas.height = sh;
+        const pCtx = probeCanvas.getContext('2d', { willReadFrequently: true })!;
+        pCtx.drawImage(rawCellCanvas, 0, 0);
+        applySmartChromaKey(pCtx, sw, sh, 'auto-corner', tolerance, bgAlgorithm, true, 3);
 
-      if (autoCenterSubject && autoRemoveBg) {
-        cellCanvas = cropToContentBoundingBox(cellCanvas, 0.05);
+        const pData = pCtx.getImageData(0, 0, sw, sh).data;
+        let minX = sw, minY = sh, maxX = -1, maxY = -1;
+        for (let y = 0; y < sh; y++) {
+          for (let x = 0; x < sw; x++) {
+            if (pData[(y * sw + x) * 4 + 3] > 35) {
+              if (x < minX) minX = x;
+              if (x > maxX) maxX = x;
+              if (y < minY) minY = y;
+              if (y > maxY) maxY = y;
+            }
+          }
+        }
+
+        if (maxX > minX && maxY > minY) {
+          const contentW = maxX - minX + 1;
+          const contentH = maxY - minY + 1;
+          const maxDim = Math.max(contentW, contentH);
+          const pad = Math.round(maxDim * 0.06);
+          const outSize = maxDim + pad * 2;
+
+          // Sample corner color of rawCellCanvas to fill padding seamlessly
+          const cornerPixel = rawCtx.getImageData(1, 1, 1, 1).data;
+          const centeredRaw = document.createElement('canvas');
+          centeredRaw.width = outSize;
+          centeredRaw.height = outSize;
+          const cCtx = centeredRaw.getContext('2d')!;
+          if (cornerPixel[3] > 128) {
+            cCtx.fillStyle = `rgb(${cornerPixel[0]}, ${cornerPixel[1]}, ${cornerPixel[2]})`;
+            cCtx.fillRect(0, 0, outSize, outSize);
+          }
+          const dx = Math.round((outSize - contentW) / 2);
+          const dy = Math.round((outSize - contentH) / 2);
+          cCtx.drawImage(rawCellCanvas, minX, minY, contentW, contentH, dx, dy, contentW, contentH);
+          rawCellCanvas = centeredRaw;
+        }
       }
 
       const blob = await new Promise<Blob>((resolve, reject) => {
-        cellCanvas.toBlob((b) => (b ? resolve(b) : reject(new Error('Cell slice failed'))), 'image/png');
+        rawCellCanvas.toBlob((b) => (b ? resolve(b) : reject(new Error('Cell slice failed'))), 'image/png');
       });
 
       results.push({

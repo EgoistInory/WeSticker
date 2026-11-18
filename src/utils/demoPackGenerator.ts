@@ -3,7 +3,7 @@
  * Provides an instant, zero-empty-state interactive showcase experience on page load or 1-click trigger.
  */
 
-export type DemoPackId = 'capybara' | 'cybershiba' | 'inkcat';
+export type DemoPackId = 'capybara' | 'cybershiba' | 'inkcat' | 'panda';
 
 export interface DemoPackMeta {
   id: DemoPackId;
@@ -70,6 +70,23 @@ export const DEMO_PACKS: DemoPackMeta[] = [
       { name: '08_困成猫饼', caption: '晚安玛卡', mood: 'sleep' },
     ],
   },
+  {
+    id: 'panda',
+    albumName: '魔性打工熊猫滚滚',
+    subtitle: '纯白脸部防抠穿特调 · 专治各种职场内耗',
+    badge: '白脸护盾实测',
+    accent: '#10B981',
+    expressions: [
+      { name: '01_收到', caption: '收到!', mood: 'happy' },
+      { name: '02_吃竹摸鱼', caption: '吃瓜看戏', mood: 'chill' },
+      { name: '03_礼貌微笑', caption: '你礼貌吗', mood: 'cool' },
+      { name: '04_抱大腿', caption: '富婆贴贴', mood: 'love' },
+      { name: '05_黑眼圈加重', caption: '熬夜肝图', mood: 'shock' },
+      { name: '06_掀桌', caption: '不干了!', mood: 'rage' },
+      { name: '07_竹笋暴富', caption: '搞快打钱', mood: 'rich' },
+      { name: '08_躺平', caption: '彻底躺平', mood: 'sleep' },
+    ],
+  },
 ];
 
 /**
@@ -110,6 +127,11 @@ function drawCharacterIllustration(
     bodyStroke = '#0F111A';
     snoutFill = '#434663';
     blushColor = 'rgba(244, 114, 182, 0.6)';
+  } else if (packId === 'panda') {
+    bodyFill = '#FFFFFF';
+    bodyStroke = '#141619';
+    snoutFill = '#F4F4F6';
+    blushColor = 'rgba(255, 115, 140, 0.58)';
   }
 
   ctx.lineWidth = Math.max(5, size * 0.026);
@@ -118,12 +140,20 @@ function drawCharacterIllustration(
   ctx.lineCap = 'round';
 
   // Ears
-  if (packId === 'capybara') {
-    // Round little capybara ears
+  if (packId === 'capybara' || packId === 'panda') {
+    // Round ears (black for panda, brown for capybara)
     for (const dir of [-1, 1]) {
-      ctx.fillStyle = snoutFill;
+      ctx.fillStyle = packId === 'panda' ? '#141619' : snoutFill;
       ctx.beginPath();
-      ctx.ellipse(cx + dir * r * 0.72, cy - r * 0.72, r * 0.22, r * 0.16, dir * 0.4, 0, Math.PI * 2);
+      ctx.ellipse(
+        cx + dir * r * 0.72,
+        cy - r * 0.72,
+        r * (packId === 'panda' ? 0.28 : 0.22),
+        r * (packId === 'panda' ? 0.26 : 0.16),
+        dir * 0.4,
+        0,
+        Math.PI * 2
+      );
       ctx.fill();
       ctx.stroke();
     }
@@ -183,11 +213,21 @@ function drawCharacterIllustration(
   ctx.ellipse(cx + r * 0.62, cy + r * 0.15, r * 0.16, r * 0.1, 0, 0, Math.PI * 2);
   ctx.fill();
 
+  // Iconic Black Eye Patches for Panda
+  if (packId === 'panda') {
+    ctx.fillStyle = '#181A1F';
+    for (const dir of [-1, 1]) {
+      ctx.beginPath();
+      ctx.ellipse(cx + dir * r * 0.42, cy - r * 0.14, r * 0.23, r * 0.18, dir * -0.25, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
   // Eyes & Facial Expressions by Mood
   const eyeY = cy - r * 0.16;
   const eyeOffsetX = r * 0.44;
-  ctx.strokeStyle = packId === 'inkcat' ? '#FBBF24' : bodyStroke;
-  ctx.fillStyle = packId === 'inkcat' ? '#FBBF24' : bodyStroke;
+  ctx.strokeStyle = packId === 'inkcat' ? '#FBBF24' : packId === 'panda' ? '#FFFFFF' : bodyStroke;
+  ctx.fillStyle = packId === 'inkcat' ? '#FBBF24' : packId === 'panda' ? '#FFFFFF' : bodyStroke;
 
   if (mood === 'chill' || mood === 'sleep') {
     // Calm horizontal dash eyes
@@ -400,7 +440,16 @@ export async function generateDemoSpriteSheetBlob(packId: DemoPackId = 'capybara
   for (let i = 0; i < 9; i++) {
     const r = Math.floor(i / 3);
     const c = i % 3;
-    drawCharacterIllustration(cellCtx, cellSize, meta.id, moods[i], '#F6F3E9');
+    const bgHex = packId === 'panda' ? '#FFFFFF' : '#F6F3E9';
+    drawCharacterIllustration(cellCtx, cellSize, meta.id, moods[i], bgHex);
+
+    // For panda test sheet: simulate a realistic 3px broken line-art gap on #1 (i===0) and #3 (i===2)
+    // to prove that our Morphological Gap-Closing + Interior White-Face Shield prevents face hollowing!
+    if (packId === 'panda' && (i === 0 || i === 2)) {
+      cellCtx.fillStyle = '#FFFFFF';
+      cellCtx.fillRect(cellSize / 2 - 2, cellSize * 0.21, 4, 16);
+    }
+
     ctx.drawImage(cellCanvas, c * cellSize, r * cellSize);
   }
 
